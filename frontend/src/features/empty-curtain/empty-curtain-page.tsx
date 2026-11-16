@@ -1,3 +1,4 @@
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import {
   PageHeader,
   PageTitle,
@@ -18,10 +19,18 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogBackdrop,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogPopup,
+  AlertDialogPortal,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -278,7 +287,7 @@ export function EmptyCurtainPage() {
               <p className="py-2.5 text-xs text-muted-foreground">
                 {t(
                   snapshot.canOperate
-                    ? "Right-click equipment to manage it through the plugin"
+                    ? "Click or right-click equipment to manage it through the plugin"
                     : "Select equipment to view its recorded details",
                 )}
               </p>
@@ -360,6 +369,8 @@ function CharacterEquipmentDialog({
     }
     return counts;
   }, [items]);
+  const [confirmUnequip, setConfirmUnequip] =
+    useState<EmptyCurtainCharacterSnapshot | null>(null);
   return (
     <Dialog
       open
@@ -373,9 +384,7 @@ function CharacterEquipmentDialog({
           <div className="flex max-h-[calc(100dvh-3rem)] min-h-0 flex-col">
             <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background/95 px-4 py-3 backdrop-blur">
               <div>
-                <DialogTitle className="text-sm font-semibold">
-                  {t("Character Equipment")}
-                </DialogTitle>
+                <DialogTitle>{t("Character Equipment")}</DialogTitle>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {tf("{} characters", [String(characters.length)])}
                 </p>
@@ -431,8 +440,9 @@ function CharacterEquipmentDialog({
                         <Button
                           variant="ghost"
                           size="sm"
+                          className="text-destructive hover:text-destructive"
                           disabled={pending || readOnly || equipped === 0}
-                          onClick={() => onAction(character.uid, "unequip-all")}
+                          onClick={() => setConfirmUnequip(character)}
                         >
                           {t("Unequip All")}
                         </Button>
@@ -455,6 +465,45 @@ function CharacterEquipmentDialog({
               </div>
             </div>
           </div>
+          <AlertDialog
+            open={confirmUnequip !== null}
+            onOpenChange={(open) => {
+              if (!open && !pending) setConfirmUnequip(null);
+            }}
+          >
+            <AlertDialogPortal>
+              <AlertDialogBackdrop className="z-[60]" />
+              <AlertDialogPopup className="top-1/2 left-1/2 z-[61] flex w-[min(90vw,28rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-xl">
+                <AlertDialogTitle>{t("Unequip All")}</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {tf("Unequip all Console items from {}?", [
+                    confirmUnequip?.name ?? "",
+                  ])}
+                </AlertDialogDescription>
+                <div className="flex justify-end gap-2">
+                  <AlertDialogClose
+                    render={
+                      <Button variant="outline" autoFocus disabled={pending} />
+                    }
+                  >
+                    {t("Cancel")}
+                  </AlertDialogClose>
+                  <Button
+                    variant="destructive"
+                    disabled={pending}
+                    onClick={() => {
+                      if (!confirmUnequip) return;
+                      const uid = confirmUnequip.uid;
+                      setConfirmUnequip(null);
+                      onAction(uid, "unequip-all");
+                    }}
+                  >
+                    {t("Unequip All")}
+                  </Button>
+                </div>
+              </AlertDialogPopup>
+            </AlertDialogPortal>
+          </AlertDialog>
         </DialogPopup>
       </DialogPortal>
     </Dialog>
@@ -487,9 +536,7 @@ function FilterDialog({
           <div className="flex max-h-[calc(100dvh-3rem)] min-h-0 flex-col">
             <header className="flex shrink-0 items-center justify-between gap-3 border-b bg-background/95 px-4 py-3 backdrop-blur">
               <div>
-                <DialogTitle className="text-sm font-semibold">
-                  {t("Filter Console Equipment")}
-                </DialogTitle>
+                <DialogTitle>{t("Filter Console Equipment")}</DialogTitle>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {activeEquipmentFilterCount(filters) > 0
                     ? tf("{} filters active", [
@@ -852,6 +899,15 @@ function EquipmentDetailsDialog({
     [],
   );
   const [positionKey, setPositionKey] = useState("");
+  const [positionsLoading, setPositionsLoading] = useState(false);
+  const [positionsError, setPositionsError] = useState(false);
+  const positionRequestGen = useRef(0);
+  useEffect(() => {
+    const requestCounter = positionRequestGen;
+    return () => {
+      requestCounter.current += 1;
+    };
+  }, []);
   const target = characters.find(
     (character) => itemUidKey(character.uid) === targetKey,
   );
@@ -859,17 +915,33 @@ function EquipmentDetailsDialog({
     (character) => character.characterId === item.equippedCharacterId,
   );
   const selectCharacter = (key: string) => {
+    const requestId = ++positionRequestGen.current;
     setTargetKey(key);
     setPositions([]);
     setPositionKey("");
+    setPositionsError(false);
     const character = characters.find(
       (candidate) => itemUidKey(candidate.uid) === key,
     );
     if (character && item.kind === "module") {
-      void loadPositions(item.uid, character.uid).then((value) => {
-        setPositions(value);
-        if (value[0]) setPositionKey(`${value[0].row}:${value[0].column}`);
-      });
+      setPositionsLoading(true);
+      void loadPositions(item.uid, character.uid)
+        .then((value) => {
+          if (requestId !== positionRequestGen.current) return;
+          setPositions(value);
+          if (value[0]) setPositionKey(`${value[0].row}:${value[0].column}`);
+        })
+        .catch(() => {
+          if (requestId !== positionRequestGen.current) return;
+          setPositionsError(true);
+        })
+        .finally(() => {
+          if (requestId === positionRequestGen.current) {
+            setPositionsLoading(false);
+          }
+        });
+    } else {
+      setPositionsLoading(false);
     }
   };
   const equip = () => {
@@ -899,7 +971,7 @@ function EquipmentDetailsDialog({
               <EquipmentImage item={item} className="size-14 rounded-lg" />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <DialogTitle className="min-w-0 flex-1 truncate text-sm font-semibold">
+                  <DialogTitle className="min-w-0 flex-1 truncate">
                     {item.name}
                   </DialogTitle>
                   {item.locked ? (
@@ -1076,6 +1148,7 @@ function EquipmentDetailsDialog({
                 {characters.length > 0 && item.kind ? (
                   <div className="grid gap-2 min-[480px]:grid-cols-[minmax(0,1fr)_auto_auto]">
                     <NativeSelect
+                      aria-label={t("Choose Character")}
                       className="h-8 px-2 text-xs"
                       disabled={pending}
                       value={targetKey}
@@ -1093,11 +1166,15 @@ function EquipmentDetailsDialog({
                     </NativeSelect>
                     {item.kind === "module" && target ? (
                       <NativeSelect
+                        aria-label={t("Equipment position")}
                         className="h-8 min-w-24 px-2 text-xs"
-                        disabled={pending}
+                        disabled={pending || positionsLoading}
                         value={positionKey}
                         onChange={(event) => setPositionKey(event.target.value)}
                       >
+                        {positionsLoading ? (
+                          <option value="">{t("Loading…")}</option>
+                        ) : null}
                         {positions.map((position) => (
                           <option
                             key={`${position.row}:${position.column}`}
@@ -1115,6 +1192,7 @@ function EquipmentDetailsDialog({
                       size="sm"
                       disabled={
                         pending ||
+                        positionsLoading ||
                         !target ||
                         (item.kind === "module" && !positionKey)
                       }
@@ -1123,6 +1201,11 @@ function EquipmentDetailsDialog({
                       {t("Equip")}
                     </Button>
                   </div>
+                ) : null}
+                {positionsError ? (
+                  <p className="text-xs text-destructive" role="alert">
+                    {t("Could not load equipment positions.")}
+                  </p>
                 ) : null}
               </section>
             </div>
@@ -1224,28 +1307,13 @@ function FloatingNotice({
   error: CommandError;
   onClose: () => void;
 }) {
-  return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-3 z-[100] flex justify-center px-3">
-      <Alert
-        variant="destructive"
-        className="pointer-events-auto w-full max-w-xl bg-background shadow-lg"
-      >
-        <AlertTitle>{t("Console equipment operation failed")}</AlertTitle>
-        <AlertDescription>
-          {tf(error.messageKey, error.messageArguments)}
-        </AlertDescription>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="absolute top-2 right-2"
-          aria-label={t("Close")}
-          onClick={onClose}
-        >
-          <X aria-hidden="true" />
-        </Button>
-      </Alert>
-    </div>,
-    document.body,
+  return (
+    <FloatingActionNotice
+      status="error"
+      message={t("Console equipment operation failed")}
+      detail={tf(error.messageKey, error.messageArguments)}
+      onDismiss={onClose}
+    />
   );
 }
 

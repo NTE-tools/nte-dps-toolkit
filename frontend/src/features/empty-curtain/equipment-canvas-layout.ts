@@ -50,13 +50,12 @@ export interface EquipmentCanvasRenderWindow {
   overscan: number;
 }
 
-export type EquipmentCanvasPointerIntent = "focus" | "open" | null;
+export type EquipmentCanvasPointerIntent = "open" | null;
 
 export function equipmentCanvasPointerIntent(
   button: number,
 ): EquipmentCanvasPointerIntent {
-  if (button === 0) return "focus";
-  if (button === 2) return "open";
+  if (button === 0 || button === 2) return "open";
   return null;
 }
 

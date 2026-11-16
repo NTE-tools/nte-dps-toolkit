@@ -93,6 +93,13 @@ impl AppState {
         self.0.live_capture.status().phase
     }
 
+    pub(crate) fn is_capture_or_replay_active(&self) -> Result<bool, CoreError> {
+        Ok(matches!(
+            self.capture_phase(),
+            LiveCapturePhase::Starting | LiveCapturePhase::Running | LiveCapturePhase::Stopping
+        ) || self.replay_running()?)
+    }
+
     pub(crate) fn session_has_data(&self) -> Result<bool, CoreError> {
         self.0.live_capture.with_state(|state| {
             !state.hits.is_empty()
@@ -161,11 +168,8 @@ impl AppState {
 
     pub(crate) fn undo_session_reset(&self, token: &str) -> Result<(), SessionUndoError> {
         self.0.session_undo.ensure_available()?;
-        if matches!(
-            self.capture_phase(),
-            LiveCapturePhase::Starting | LiveCapturePhase::Running | LiveCapturePhase::Stopping
-        ) || self
-            .replay_running()
+        if self
+            .is_capture_or_replay_active()
             .map_err(|_| SessionUndoError::StateUnavailable)?
         {
             return Err(SessionUndoError::Busy);

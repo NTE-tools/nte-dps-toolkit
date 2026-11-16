@@ -41,6 +41,5 @@ describe("update presentation", () => {
 
   it("uses the shared component label keys", () => {
     expect(updateComponentLabelKey("app")).toBe("Application");
-    expect(updateComponentLabelKey("mods-plugin")).toBe("Mod loader");
   });
 });

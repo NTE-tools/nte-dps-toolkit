@@ -1,16 +1,17 @@
-use std::{sync::mpsc, thread, time::Duration};
+use std::time::Duration;
 
 use tauri::{Emitter, LogicalPosition, LogicalSize, WebviewWindow, WindowEvent};
 
 use crate::{
     contract::CommandError,
     state::{AppState, MainDpsDetailKind},
-    windows::window_position,
+    windows::window_position::{self, DebouncedEvent, WindowPersistenceRuntime},
 };
 
 pub(crate) const CHARACTER_DETAILS_WINDOW_LABEL: &str = "character-details";
 pub(crate) const TEAM_DETAILS_WINDOW_LABEL: &str = "team-details";
 pub(crate) const COMBAT_DETAILS_CHANGED_EVENT: &str = "main-dps-detail-requested";
+const GEOMETRY_SAVE_DEBOUNCE: Duration = Duration::from_millis(180);
 
 pub(crate) fn window_kind(window: &WebviewWindow) -> Result<MainDpsDetailKind, CommandError> {
     match window.label() {
@@ -64,49 +65,31 @@ pub(crate) fn initialize(
     window: &WebviewWindow,
     state: &AppState,
     kind: MainDpsDetailKind,
+    persistence: &WindowPersistenceRuntime,
 ) -> Result<(), String> {
     let webview = window.as_ref().clone();
     if let Err(error) = webview.set_auto_resize(true) {
         log::warn!("enable native combat details WebView auto-resize failed: {error}");
     }
-    let (sender, receiver) = mpsc::channel::<Option<([f32; 2], [f32; 2])>>();
     let persistence_state = state.clone();
     let thread_name = match kind {
         MainDpsDetailKind::Character => "tauri-character-detail-geometry-save",
         MainDpsDetailKind::Team => "tauri-team-detail-geometry-save",
     };
-    thread::Builder::new()
-        .name(thread_name.to_owned())
-        .spawn(move || {
-            while let Ok(Some(mut latest)) = receiver.recv() {
-                loop {
-                    match receiver.recv_timeout(Duration::from_millis(180)) {
-                        Ok(Some(next)) => latest = next,
-                        Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            if let Err(error) = persistence_state
-                                .set_main_dps_detail_window_geometry(latest.0, latest.1, kind)
-                            {
-                                log::error!(
-                                    "persist combat detail window geometry failed: {error}"
-                                );
-                            }
-                            return;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    }
-                }
-                if let Err(error) =
-                    persistence_state.set_main_dps_detail_window_geometry(latest.0, latest.1, kind)
-                {
-                    log::error!("persist combat detail window geometry failed: {error}");
-                }
+    let sender = persistence.spawn_debounced(
+        thread_name,
+        GEOMETRY_SAVE_DEBOUNCE,
+        move |(size, position): ([f32; 2], [f32; 2])| {
+            if let Err(error) =
+                persistence_state.set_main_dps_detail_window_geometry(size, position, kind)
+            {
+                log::error!("persist combat detail window geometry failed: {error}");
             }
-        })
-        .map_err(|error| error.to_string())?;
+        },
+    )?;
 
     let close_window = window.clone();
     let event_window = window.clone();
-    let event_sender = sender.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::Moved(_)
         | WindowEvent::Resized(_)
@@ -128,7 +111,10 @@ pub(crate) fn initialize(
             };
             let position = position.to_logical::<f32>(scale);
             let size = size.to_logical::<f32>(scale);
-            let _ = event_sender.send(Some(([size.width, size.height], [position.x, position.y])));
+            let _ = sender.send(DebouncedEvent::Changed((
+                [size.width, size.height],
+                [position.x, position.y],
+            )));
         }
         WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
@@ -137,7 +123,7 @@ pub(crate) fn initialize(
             }
         }
         WindowEvent::Destroyed => {
-            let _ = event_sender.send(None);
+            let _ = sender.send(DebouncedEvent::Shutdown);
         }
         _ => {}
     });

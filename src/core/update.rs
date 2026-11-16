@@ -18,8 +18,6 @@ pub const UPDATE_VARIANT: &str = "standard";
 #[cfg(feature = "external_resources")]
 pub const UPDATE_VARIANT: &str = "external-resources";
 pub const APP_COMPONENT_ID: &str = "app";
-pub const MODS_PLUGIN_COMPONENT_ID: &str = "mods-plugin";
-const LEGACY_MODS_PLUGIN_COMPONENT_ID: &str = "equipment-plugin";
 pub const UPDATE_HEALTH_MARKER_ENV: &str = "NTE_UPDATE_HEALTH_MARKER";
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 pub const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
@@ -113,21 +111,16 @@ struct UpdateArtifact {
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateComponent {
     App,
-    ModsPlugin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstalledComponentVersions {
     pub app: Version,
-    pub mods_plugin: Option<Version>,
 }
 
 pub fn installed_app_version(version: &str) -> Result<InstalledComponentVersions, UpdateError> {
     let app = Version::parse(version).map_err(|_| UpdateError::InvalidVersion)?;
-    Ok(InstalledComponentVersions {
-        app,
-        mods_plugin: None,
-    })
+    Ok(InstalledComponentVersions { app })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,22 +271,18 @@ fn validate_manifest(
     }
     let mut updates = Vec::new();
     let mut seen_app = false;
-    let mut seen_mods_plugin = false;
     for component in manifest.components {
         if component.platform != UPDATE_PLATFORM || component.variant != UPDATE_VARIANT {
             continue;
         }
-        let (kind, seen) = match component.id.as_str() {
-            APP_COMPONENT_ID => (UpdateComponent::App, &mut seen_app),
-            MODS_PLUGIN_COMPONENT_ID | LEGACY_MODS_PLUGIN_COMPONENT_ID => {
-                (UpdateComponent::ModsPlugin, &mut seen_mods_plugin)
-            }
+        let kind = match component.id.as_str() {
+            APP_COMPONENT_ID => UpdateComponent::App,
             _ => continue,
         };
-        if *seen {
+        if seen_app {
             return Err(UpdateError::DuplicateComponent(component.id));
         }
-        *seen = true;
+        seen_app = true;
 
         let version =
             Version::parse(&component.version).map_err(|_| UpdateError::InvalidVersion)?;
@@ -313,11 +302,7 @@ fn validate_manifest(
         if requirement.is_some_and(|requirement| !requirement.matches(&installed.app)) {
             continue;
         }
-        let current = match kind {
-            UpdateComponent::App => Some(&installed.app),
-            UpdateComponent::ModsPlugin => installed.mods_plugin.as_ref(),
-        };
-        if current.is_some_and(|current| version <= *current) {
+        if version <= installed.app {
             continue;
         }
         updates.push(AvailableComponentUpdate {
@@ -331,10 +316,6 @@ fn validate_manifest(
             artifact_sha256,
         });
     }
-    updates.sort_by_key(|update| match update.component {
-        UpdateComponent::App => 0,
-        UpdateComponent::ModsPlugin => 1,
-    });
     Ok(updates)
 }
 
@@ -499,7 +480,6 @@ mod tests {
             &endpoint,
             &InstalledComponentVersions {
                 app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
             },
         )
         .unwrap();
@@ -516,7 +496,6 @@ mod tests {
             &endpoint,
             &InstalledComponentVersions {
                 app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
             },
         )
         .unwrap();
@@ -525,13 +504,13 @@ mod tests {
     }
 
     #[test]
-    fn accepts_plugin_release_without_newer_app() {
+    fn ignores_unknown_and_retired_components_in_signed_manifest() {
         let mut document = payload("0.3.5");
         document["components"]
             .as_array_mut()
             .expect("components should be an array")
             .push(json!({
-                "id": MODS_PLUGIN_COMPONENT_ID,
+                "id": "mods-plugin",
                 "version": "0.3.6",
                 "platform": "windows-x86_64",
                 "variant": UPDATE_VARIANT,
@@ -549,76 +528,6 @@ mod tests {
             &endpoint,
             &InstalledComponentVersions {
                 app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].component, UpdateComponent::ModsPlugin);
-        assert_eq!(updates[0].version, Version::parse("0.3.6").unwrap());
-    }
-
-    #[test]
-    fn accepts_retired_plugin_component_id_during_channel_migration() {
-        let mut document = payload("0.3.5");
-        document["components"]
-            .as_array_mut()
-            .expect("components should be an array")
-            .push(json!({
-                "id": LEGACY_MODS_PLUGIN_COMPONENT_ID,
-                "version": "0.3.6",
-                "platform": "windows-x86_64",
-                "variant": UPDATE_VARIANT,
-                "requires_app": ">=0.3.5,<0.4.0",
-                "artifact": {
-                    "url": "https://updates.example.test/releases/0.3.6/mods-plugin.zip",
-                    "size": 512,
-                    "sha256": "22".repeat(32),
-                }
-            }));
-        let (bytes, endpoint) = signed_manifest(document);
-
-        let updates = verify_manifest(
-            &bytes,
-            &endpoint,
-            &InstalledComponentVersions {
-                app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].component, UpdateComponent::ModsPlugin);
-    }
-
-    #[test]
-    fn ignores_plugin_incompatible_with_installed_app() {
-        let mut document = payload("0.3.5");
-        document["components"]
-            .as_array_mut()
-            .expect("components should be an array")
-            .push(json!({
-                "id": MODS_PLUGIN_COMPONENT_ID,
-                "version": "0.3.6",
-                "platform": "windows-x86_64",
-                "variant": UPDATE_VARIANT,
-                "requires_app": ">=0.4.0",
-                "artifact": {
-                    "url": "https://updates.example.test/releases/0.3.6/mods-plugin.zip",
-                    "size": 512,
-                    "sha256": "22".repeat(32),
-                }
-            }));
-        let (bytes, endpoint) = signed_manifest(document);
-
-        let updates = verify_manifest(
-            &bytes,
-            &endpoint,
-            &InstalledComponentVersions {
-                app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
             },
         )
         .unwrap();
@@ -637,7 +546,6 @@ mod tests {
             &endpoint,
             &InstalledComponentVersions {
                 app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
             },
         )
         .unwrap_err();
@@ -657,7 +565,6 @@ mod tests {
             &endpoint,
             &InstalledComponentVersions {
                 app: Version::parse("0.3.5").unwrap(),
-                mods_plugin: Some(Version::parse("0.3.5").unwrap()),
             },
         )
         .unwrap_err();

@@ -106,7 +106,7 @@ mod tests {
         engine::model::{CombatState, PacketDebug},
     };
 
-    use crate::contract::stream::MAX_STREAM_DELIVERY_BYTES;
+    use crate::contract::stream::tests::MAX_STREAM_DELIVERY_BYTES;
 
     #[test]
     fn five_hundred_worst_case_escaped_packets_fit_the_stream_envelope() {

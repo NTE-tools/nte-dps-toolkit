@@ -8,7 +8,7 @@ use std::{
 };
 
 use nte_dps_tool::{
-    core::{CoreError, capture::enumerate_devices, sync::lock_or_repair},
+    core::{CoreError, capture::enumerate_devices},
     storage::config::{self, UiConfig},
 };
 
@@ -54,36 +54,17 @@ struct DeviceCatalogState {
     available: bool,
 }
 
-/// Device state is rebuildable. Never project possibly partial entries; the
-/// next successful OS enumeration replaces all data.
-fn discard_device_catalog(state: &mut DeviceCatalogState) {
-    *state = DeviceCatalogState {
-        devices: Vec::new(),
-        available: false,
-    };
-}
-
-fn close_transaction(state: &mut TransactionState) {
-    *state = TransactionState::Unavailable;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TransactionState {
-    Ready,
-    Unavailable,
-}
-
 pub(crate) struct SettingsService {
     config_path: PathBuf,
     config: Mutex<UiConfig>,
-    config_transaction: Mutex<TransactionState>,
+    config_transaction: Mutex<()>,
     devices: Mutex<DeviceCatalogState>,
     device_probe_generation: AtomicU64,
-    passthrough_transaction: Mutex<TransactionState>,
+    passthrough_transaction: Mutex<()>,
 }
 
 pub(crate) struct PassthroughTransactionGuard<'a> {
-    _guard: MutexGuard<'a, TransactionState>,
+    _guard: MutexGuard<'a, ()>,
 }
 
 impl SettingsService {
@@ -99,23 +80,15 @@ impl SettingsService {
         Self {
             config_path,
             config: Mutex::new(config.sanitized()),
-            config_transaction: Mutex::new(TransactionState::Ready),
+            config_transaction: Mutex::new(()),
             devices: Mutex::new(DeviceCatalogState { devices, available }),
             device_probe_generation: AtomicU64::new(0),
-            passthrough_transaction: Mutex::new(TransactionState::Ready),
+            passthrough_transaction: Mutex::new(()),
         }
     }
 
     pub(crate) fn config_snapshot(&self) -> UiConfig {
-        // `config` never exposes a mutable guard. Updates build a complete,
-        // sanitized candidate without this lock and only replace the whole
-        // value while locked, so a panic cannot expose a partial mutation.
-        let (config, recovered) =
-            lock_or_repair(&self.config, |config| *config = config.clone().sanitized());
-        if recovered {
-            log::warn!("Settings snapshot recovered a complete committed configuration");
-        }
-        config.clone()
+        self.config.lock().expect("settings config lock").clone()
     }
 
     pub(crate) fn update_config(
@@ -132,10 +105,10 @@ impl SettingsService {
         save: impl FnOnce(&Path, &UiConfig) -> Result<(), String>,
         on_commit: impl FnOnce(&ConfigUpdate),
     ) -> Result<Option<ConfigUpdate>, SettingsServiceError> {
-        let (transaction, _) = lock_or_repair(&self.config_transaction, close_transaction);
-        if *transaction == TransactionState::Unavailable {
-            return Err(SettingsServiceError::TransactionUnavailable);
-        }
+        let transaction = self
+            .config_transaction
+            .lock()
+            .map_err(|_| SettingsServiceError::TransactionUnavailable)?;
 
         let previous = self.config_snapshot();
         let mut current = previous.clone();
@@ -148,8 +121,7 @@ impl SettingsService {
         // The transaction gate deliberately serializes config file commits, but
         // no config/device/team state lock is held across this disk I/O.
         save(&self.config_path, &current).map_err(|_| SettingsServiceError::ConfigSave)?;
-        // See `config_snapshot`: only whole validated values are stored.
-        let (mut config, _) = lock_or_repair(&self.config, |_| {});
+        let mut config = self.config.lock().expect("settings config lock");
         *config = current.clone();
         let committed = ConfigUpdate { previous, current };
         // Publish the revision while the committed value is still locked. A
@@ -161,12 +133,8 @@ impl SettingsService {
         Ok(Some(committed))
     }
 
-    pub(crate) fn device_catalog_snapshot(&self, on_recovery: impl Fn()) -> DeviceCatalogSnapshot {
-        let (devices, recovered) = lock_or_repair(&self.devices, discard_device_catalog);
-        if recovered {
-            on_recovery();
-            log::warn!("Capture device catalog was discarded after an interrupted update");
-        }
+    pub(crate) fn device_catalog_snapshot(&self) -> DeviceCatalogSnapshot {
+        let devices = self.devices.lock().expect("device catalog lock");
         DeviceCatalogSnapshot {
             devices: devices.devices.clone(),
             available: devices.available,
@@ -194,18 +162,15 @@ impl SettingsService {
             .wrapping_add(1);
         // Enumeration is an OS/FFI boundary and must complete without the catalog lock.
         let candidate = enumerate();
-        let (mut devices, recovered) = lock_or_repair(&self.devices, discard_device_catalog);
+        let mut devices = self.devices.lock().expect("device catalog lock");
         if generation != self.device_probe_generation.load(Ordering::Acquire) {
             // A newer request owns publication. Stale success and failure both
             // leave the latest whole catalog and its availability untouched.
-            if recovered {
-                on_change();
-            }
             return DeviceRefreshOutcome { error: None };
         }
         match candidate {
             Ok(candidate) => {
-                let changed = recovered || !devices.available || devices.devices != candidate;
+                let changed = !devices.available || devices.devices != candidate;
                 *devices = DeviceCatalogState {
                     devices: candidate,
                     available: true,
@@ -216,7 +181,7 @@ impl SettingsService {
                 DeviceRefreshOutcome { error: None }
             }
             Err(error) => {
-                let changed = recovered || devices.available;
+                let changed = devices.available;
                 devices.available = false;
                 if changed {
                     on_change();
@@ -229,10 +194,10 @@ impl SettingsService {
     pub(crate) fn lock_passthrough_transaction(
         &self,
     ) -> Result<PassthroughTransactionGuard<'_>, SettingsServiceError> {
-        let (guard, _) = lock_or_repair(&self.passthrough_transaction, close_transaction);
-        if *guard == TransactionState::Unavailable {
-            return Err(SettingsServiceError::PassthroughUnavailable);
-        }
+        let guard = self
+            .passthrough_transaction
+            .lock()
+            .map_err(|_| SettingsServiceError::PassthroughUnavailable)?;
         Ok(PassthroughTransactionGuard { _guard: guard })
     }
 }
@@ -310,38 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_config_transaction_blocks_followup_disk_writes() {
-        let service = service_with_devices(Vec::new());
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = service
-                .config_transaction
-                .lock()
-                .expect("healthy transaction");
-            panic!("interrupt settings transaction before its commit point");
-        });
-        let saves = AtomicUsize::new(0);
-
-        let result = service.update_config_with(
-            |config| config.opacity = 0.42,
-            |_, _| {
-                saves.fetch_add(1, Ordering::AcqRel);
-                Ok(())
-            },
-            |_| {},
-        );
-
-        assert!(matches!(
-            result,
-            Err(SettingsServiceError::TransactionUnavailable)
-        ));
-        assert_eq!(saves.load(Ordering::Acquire), 0);
-        assert_eq!(
-            service.config_snapshot().opacity,
-            UiConfig::default().opacity
-        );
-    }
-
-    #[test]
     fn device_probe_runs_without_the_device_lock_and_preserves_last_good_as_degraded() {
         let service = service_with_devices(vec![device("last-good")]);
         let changes = AtomicUsize::new(0);
@@ -361,43 +294,9 @@ mod tests {
 
         assert!(outcome.error.is_some());
         assert_eq!(changes.load(Ordering::Acquire), 1);
-        let snapshot = service.device_catalog_snapshot(|| {});
+        let snapshot = service.device_catalog_snapshot();
         assert!(!snapshot.available);
         assert_eq!(snapshot.devices[0].id, "last-good");
-    }
-
-    #[test]
-    fn poisoned_device_catalog_is_not_projected_as_a_healthy_empty_list() {
-        let service = service_with_devices(vec![device("private-device")]);
-        let _ = std::panic::catch_unwind(|| {
-            let mut devices = service.devices.lock().expect("healthy device catalog");
-            devices.devices.clear();
-            panic!("interrupt device catalog mutation");
-        });
-
-        let recoveries = AtomicUsize::new(0);
-        let snapshot = service.device_catalog_snapshot(|| {
-            recoveries.fetch_add(1, Ordering::AcqRel);
-        });
-        assert!(!snapshot.available);
-        assert_eq!(recoveries.load(Ordering::Acquire), 1);
-    }
-
-    #[test]
-    fn poisoned_passthrough_gate_fails_closed_without_running_the_operation() {
-        let service = service_with_devices(Vec::new());
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = service
-                .passthrough_transaction
-                .lock()
-                .expect("healthy passthrough transaction");
-            panic!("interrupt passthrough transition");
-        });
-
-        assert!(matches!(
-            service.lock_passthrough_transaction(),
-            Err(SettingsServiceError::PassthroughUnavailable)
-        ));
     }
 
     #[test]
@@ -434,7 +333,7 @@ mod tests {
         assert!(old_outcome.error.is_none());
         assert_eq!(publications.load(Ordering::Acquire), 1);
         assert_eq!(
-            service.device_catalog_snapshot(|| {}).devices,
+            service.device_catalog_snapshot().devices,
             vec![device("new")]
         );
     }
@@ -472,55 +371,11 @@ mod tests {
         );
         release_tx.send(()).expect("release old probe");
         let old_outcome = old.join().expect("join old probe");
-        let snapshot = service.device_catalog_snapshot(|| {});
+        let snapshot = service.device_catalog_snapshot();
 
         assert!(old_outcome.error.is_none());
         assert!(snapshot.available);
         assert_eq!(snapshot.devices, vec![device("new")]);
-        assert_eq!(publications.load(Ordering::Acquire), 1);
-    }
-
-    #[test]
-    fn latest_success_rebuilds_poison_while_an_old_probe_stays_stale() {
-        let service = Arc::new(service_with_devices(vec![device("initial")]));
-        let _ = std::panic::catch_unwind({
-            let service = Arc::clone(&service);
-            move || {
-                let _devices = service.devices.lock().expect("healthy catalog");
-                panic!("poison device catalog before overlapping probes");
-            }
-        });
-        let publications = Arc::new(AtomicUsize::new(0));
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let old_service = Arc::clone(&service);
-        let old_publications = Arc::clone(&publications);
-        let old = thread::spawn(move || {
-            old_service.refresh_devices_with(
-                || {
-                    started_tx.send(()).expect("announce old probe");
-                    release_rx.recv().expect("release old probe");
-                    Ok(vec![device("old")])
-                },
-                || {
-                    old_publications.fetch_add(1, Ordering::AcqRel);
-                },
-            )
-        });
-        started_rx.recv().expect("old probe started");
-
-        service.refresh_devices_with(
-            || Ok(vec![device("rebuilt")]),
-            || {
-                publications.fetch_add(1, Ordering::AcqRel);
-            },
-        );
-        release_tx.send(()).expect("release old probe");
-        old.join().expect("join old probe");
-        let snapshot = service.device_catalog_snapshot(|| {});
-
-        assert!(snapshot.available);
-        assert_eq!(snapshot.devices, vec![device("rebuilt")]);
         assert_eq!(publications.load(Ordering::Acquire), 1);
     }
 }

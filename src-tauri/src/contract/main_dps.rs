@@ -572,7 +572,7 @@ fn can_start_new_round(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::stream::MAX_STREAM_DELIVERY_BYTES;
+    use crate::contract::stream::tests::MAX_STREAM_DELIVERY_BYTES;
 
     #[test]
     fn game_detection_distinguishes_normal_negative_from_probe_failure() {

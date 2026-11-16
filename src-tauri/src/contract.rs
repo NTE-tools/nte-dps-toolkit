@@ -151,201 +151,123 @@ impl CommandError {
     }
 
     pub(crate) fn invalid_subscription_id() -> Self {
-        Self {
-            code: "invalid_subscription_id",
-            message_key: "Technical subscription identifier is invalid.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "invalid_subscription_id",
+            "Technical subscription identifier is invalid.",
+        )
     }
 
     pub(crate) fn stream_runtime_unavailable() -> Self {
-        Self {
-            code: "stream_runtime_unavailable",
-            message_key: "The live view did not start.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("stream_runtime_unavailable", "The live view did not start.")
     }
 
     pub(crate) fn invalid_window() -> Self {
-        Self {
-            code: "invalid_window",
-            message_key: "Technical command is not available for this window.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "invalid_window",
+            "Technical command is not available for this window.",
+        )
     }
 
     pub(crate) fn window_operation_failed() -> Self {
-        Self {
-            code: "window_operation_failed",
-            message_key: "HUD window operation failed.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("window_operation_failed", "HUD window operation failed.")
     }
 
     pub(crate) fn passthrough_hotkey_unavailable() -> Self {
-        Self {
-            code: "passthrough_hotkey_unavailable",
-            message_key: "Global hotkeys are not ready; mouse passthrough was not enabled",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
-    }
-
-    pub(crate) fn hud_config_save_failed() -> Self {
-        Self {
-            code: "hud_config_save_failed",
-            message_key: "Failed to save HUD configuration.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "passthrough_hotkey_unavailable",
+            "Global hotkeys are not ready; mouse passthrough was not enabled",
+        )
     }
 
     pub(crate) fn invalid_settings_input() -> Self {
-        Self {
-            code: "invalid_settings_input",
-            message_key: "Settings input is invalid.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("invalid_settings_input", "Settings input is invalid.")
     }
 
     pub(crate) fn hotkey_conflict() -> Self {
-        Self {
-            code: "hotkey_conflict",
-            message_key: "This shortcut is already assigned",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("hotkey_conflict", "This shortcut is already assigned")
     }
 
     pub(crate) fn settings_config_save_failed() -> Self {
-        Self {
-            code: "settings_config_save_failed",
-            message_key: "Failed to save settings.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("settings_config_save_failed", "Failed to save settings.")
     }
 
     pub(crate) fn settings_transaction_unavailable() -> Self {
-        Self {
-            code: "settings_transaction_unavailable",
-            message_key: "Settings change did not complete.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "settings_transaction_unavailable",
+            "Settings change did not complete.",
+        )
     }
 
     pub(crate) fn passthrough_state_unavailable() -> Self {
-        Self {
-            code: "passthrough_state_unavailable",
-            message_key: "HUD interaction state is unavailable.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "passthrough_state_unavailable",
+            "HUD interaction state is unavailable.",
+        )
     }
 
     pub(crate) fn replay_import_runtime_unavailable() -> Self {
-        Self {
-            code: "replay_import_runtime_unavailable",
-            message_key: "Replay import did not complete",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "replay_import_runtime_unavailable",
+            "Replay import did not complete",
+        )
     }
 
     pub(crate) fn session_undo_runtime_unavailable() -> Self {
-        Self {
-            code: "session_undo_runtime_unavailable",
-            message_key: "The previous session is no longer available",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "session_undo_runtime_unavailable",
+            "The previous session is no longer available",
+        )
     }
 
     pub(crate) fn update_install_blocked(message_key: &'static str) -> Self {
-        Self {
-            code: "update_install_blocked",
-            message_key,
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("update_install_blocked", message_key)
     }
 
     pub(crate) fn team_data_invalid() -> Self {
-        Self {
-            code: "team_data_invalid",
-            message_key: "Team DPS data is invalid.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("team_data_invalid", "Team DPS data is invalid.")
     }
 
     pub(crate) fn team_data_unavailable() -> Self {
-        Self {
-            code: "team_data_unavailable",
-            message_key: "No team DPS data is available to export.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "team_data_unavailable",
+            "No team DPS data is available to export.",
+        )
     }
 
     pub(crate) fn team_import_state_unavailable() -> Self {
-        Self {
-            code: "team_import_state_unavailable",
-            message_key: "Imported team data is unavailable.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "team_import_state_unavailable",
+            "Imported team data is unavailable.",
+        )
     }
 
     pub(crate) fn team_data_export_failed() -> Self {
-        Self {
-            code: "team_data_export_failed",
-            message_key: "Failed to export team data.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("team_data_export_failed", "Failed to export team data.")
     }
 
     pub(crate) fn team_data_import_failed() -> Self {
-        Self {
-            code: "team_data_import_failed",
-            message_key: "Failed to import team data.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new("team_data_import_failed", "Failed to import team data.")
     }
 
     pub(crate) fn team_data_file_dialog_failed() -> Self {
-        Self {
-            code: "team_data_file_dialog_failed",
-            message_key: "Team data file dialog failed.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "team_data_file_dialog_failed",
+            "Team data file dialog failed.",
+        )
     }
 
     pub(crate) fn abyss_values_unavailable() -> Self {
-        Self {
-            code: "abyss_values_unavailable",
-            message_key: "Abyss monster values could not be loaded.",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "abyss_values_unavailable",
+            "Abyss monster values could not be loaded.",
+        )
     }
 
     pub(crate) fn abyss_team_unavailable() -> Self {
-        Self {
-            code: "abyss_team_unavailable",
-            message_key: "The DPS data file has no team usable for this line",
-            message_arguments: Vec::new(),
-            diagnostic_line: None,
-        }
+        Self::new(
+            "abyss_team_unavailable",
+            "The DPS data file has no team usable for this line",
+        )
     }
 }
 
@@ -353,6 +275,19 @@ impl From<CoreError> for CommandError {
     fn from(error: CoreError) -> Self {
         let issue = start_issue_snapshot(error.code);
         Self::with_arguments(issue.code, issue.message_key, issue.message_arguments)
+    }
+}
+
+impl From<crate::settings_service::SettingsServiceError> for CommandError {
+    fn from(error: crate::settings_service::SettingsServiceError) -> Self {
+        use crate::settings_service::SettingsServiceError;
+        match error {
+            SettingsServiceError::ConfigSave => Self::settings_config_save_failed(),
+            SettingsServiceError::TransactionUnavailable => {
+                Self::settings_transaction_unavailable()
+            }
+            SettingsServiceError::PassthroughUnavailable => Self::passthrough_state_unavailable(),
+        }
     }
 }
 

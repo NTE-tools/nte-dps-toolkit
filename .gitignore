@@ -24,7 +24,6 @@ __pycache__/
 .pytest_cache/
 /UnrealExporter/
 /NTE-Drive-Calculator/
-/tests/
 /plugins/*.dll
 /plugins/mods-plugin.state.json
 /plugins/equipment-plugin.state.json

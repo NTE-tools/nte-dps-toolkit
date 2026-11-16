@@ -3,8 +3,6 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use nte_dps_tool::core::sync::lock_or_repair;
-
 use nte_dps_tool::core::encrypted_ini::{
     EncryptedIniDocument, EncryptedIniError, EncryptedIniKey, EncryptedIniSaveOutcome,
     load_encrypted_ini_document, save_encrypted_ini_document,
@@ -79,18 +77,10 @@ impl EncryptedIniService {
         &self,
         path: PathBuf,
     ) -> Result<EncryptedIniProjection, EncryptedIniServiceError> {
-        self.open_with(path, load_encrypted_ini_document)
-    }
-
-    fn open_with(
-        &self,
-        path: PathBuf,
-        load: impl FnOnce(&std::path::Path) -> Result<EncryptedIniDocument, EncryptedIniError>,
-    ) -> Result<EncryptedIniProjection, EncryptedIniServiceError> {
         let mut reservation = self.reserve()?;
         // File validation, reading, and decryption run while the state mutex is
         // free. `InFlight` prevents a concurrent operation from seeing partial state.
-        match load(&path) {
+        match load_encrypted_ini_document(&path) {
             Ok(document) => {
                 let runtime = reservation.runtime_mut();
                 runtime.generation = runtime.generation.wrapping_add(1);
@@ -106,19 +96,12 @@ impl EncryptedIniService {
     }
 
     pub(crate) fn reload(&self) -> Result<EncryptedIniProjection, EncryptedIniServiceError> {
-        self.reload_with(load_encrypted_ini_document)
-    }
-
-    fn reload_with(
-        &self,
-        load: impl FnOnce(&std::path::Path) -> Result<EncryptedIniDocument, EncryptedIniError>,
-    ) -> Result<EncryptedIniProjection, EncryptedIniServiceError> {
         let mut reservation = self.reserve()?;
         let Some(path) = reservation.runtime_mut().path.clone() else {
             reservation.finish()?;
             return Err(EncryptedIniServiceError::NoFile);
         };
-        match load(&path) {
+        match load_encrypted_ini_document(&path) {
             Ok(document) => {
                 let runtime = reservation.runtime_mut();
                 runtime.generation = runtime.generation.wrapping_add(1);
@@ -138,26 +121,6 @@ impl EncryptedIniService {
         plaintext: String,
         key: EncryptedIniKey,
     ) -> Result<(EncryptedIniProjection, EncryptedIniSaveOutcome), EncryptedIniServiceError> {
-        self.save_with(
-            expected_generation,
-            plaintext,
-            key,
-            save_encrypted_ini_document,
-        )
-    }
-
-    fn save_with(
-        &self,
-        expected_generation: u64,
-        plaintext: String,
-        key: EncryptedIniKey,
-        save: impl FnOnce(
-            &std::path::Path,
-            &mut EncryptedIniDocument,
-            String,
-            EncryptedIniKey,
-        ) -> Result<EncryptedIniSaveOutcome, EncryptedIniError>,
-    ) -> Result<(EncryptedIniProjection, EncryptedIniSaveOutcome), EncryptedIniServiceError> {
         let mut reservation = self.reserve()?;
         if reservation.runtime_mut().generation != expected_generation {
             reservation.finish()?;
@@ -173,7 +136,7 @@ impl EncryptedIniService {
         };
         // Encryption, serialization, and atomic persistence run with the
         // service mutex unlocked while this reservation owns the document.
-        match save(&path, document, plaintext, key) {
+        match save_encrypted_ini_document(&path, document, plaintext, key) {
             Ok(outcome) => {
                 if outcome == EncryptedIniSaveOutcome::Saved {
                     let runtime = reservation.runtime_mut();
@@ -221,20 +184,7 @@ impl EncryptedIniService {
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, ServiceState>, EncryptedIniServiceError> {
-        let (state, recovered) =
-            lock_or_repair(&self.state, |state| *state = ServiceState::Unavailable);
-        if recovered {
-            return Err(EncryptedIniServiceError::Unavailable);
-        }
-        Ok(state)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn poison_for_test(&self) {
-        let _ = std::panic::catch_unwind(|| {
-            let _state = self.state.lock().expect("healthy encrypted INI state");
-            panic!("poison encrypted INI state");
-        });
+        Ok(self.state.lock().expect("encrypted INI state lock"))
     }
 }
 
@@ -268,7 +218,7 @@ impl Drop for EncryptedIniReservation<'_> {
             return;
         }
         self.runtime.take();
-        *lock_or_repair(&self.service.state, |_| {}).0 = ServiceState::Unavailable;
+        *self.service.state.lock().expect("encrypted INI state lock") = ServiceState::Unavailable;
     }
 }
 
@@ -295,7 +245,6 @@ fn project(runtime: &EncryptedIniRuntimeState) -> EncryptedIniProjection {
 mod tests {
     use std::{
         fs,
-        sync::atomic::{AtomicBool, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -321,10 +270,6 @@ mod tests {
             fs::write(&path, "Value=1\n").expect("fixture document");
             Self { root, path }
         }
-
-        fn document(&self) -> EncryptedIniDocument {
-            load_encrypted_ini_document(&self.path).expect("load fixture document")
-        }
     }
 
     impl Drop for Fixture {
@@ -334,52 +279,26 @@ mod tests {
     }
 
     #[test]
-    fn file_work_runs_outside_the_state_mutex() {
-        let fixture = Fixture::new("lock-free");
-        let service = EncryptedIniService::default();
-        let document = fixture.document();
-
-        let opened = service
-            .open_with(fixture.path.clone(), |_| {
-                assert!(service.state.try_lock().is_ok());
-                Ok(document)
-            })
-            .expect("open fixture");
-        let (unchanged, outcome) = service
-            .save_with(
-                opened.generation,
-                "Value=1".to_owned(),
-                EncryptedIniKey::Global,
-                |_, _, _, _| {
-                    assert!(service.state.try_lock().is_ok());
-                    Ok(EncryptedIniSaveOutcome::Unchanged)
-                },
-            )
-            .expect("unchanged save");
-
-        assert_eq!(opened.generation, 1);
-        assert_eq!(unchanged.generation, 1);
-        assert_eq!(outcome, EncryptedIniSaveOutcome::Unchanged);
-    }
-
-    #[test]
     fn saved_clear_and_noop_generations_are_exact() {
         let fixture = Fixture::new("generation");
         let service = EncryptedIniService::default();
-        let opened = service
-            .open_with(fixture.path.clone(), |_| Ok(fixture.document()))
-            .expect("open fixture");
+        let opened = service.open(fixture.path.clone()).expect("open fixture");
+        let (unchanged, unchanged_outcome) = service
+            .save(opened.generation, opened.plaintext.clone(), opened.key)
+            .expect("unchanged save");
         let (saved, outcome) = service
-            .save_with(
+            .save(
                 opened.generation,
-                "Value=2".to_owned(),
+                "Value=2\n".to_owned(),
                 EncryptedIniKey::Global,
-                |_, _, _, _| Ok(EncryptedIniSaveOutcome::Saved),
             )
             .expect("saved update");
         let cleared = service.clear().expect("clear loaded document");
         let repeated = service.clear().expect("repeat clear");
 
+        assert_eq!(opened.generation, 1);
+        assert_eq!(unchanged.generation, 1);
+        assert_eq!(unchanged_outcome, EncryptedIniSaveOutcome::Unchanged);
         assert_eq!(outcome, EncryptedIniSaveOutcome::Saved);
         assert_eq!(saved.generation, 2);
         assert_eq!(cleared.generation, 3);
@@ -390,16 +309,11 @@ mod tests {
     fn stale_and_failed_operations_do_not_run_or_bump() {
         let fixture = Fixture::new("failure");
         let service = EncryptedIniService::default();
-        let opened = service
-            .open_with(fixture.path.clone(), |_| Ok(fixture.document()))
-            .expect("open fixture");
-        let called = AtomicBool::new(false);
+        let opened = service.open(fixture.path.clone()).expect("open fixture");
 
-        let stale = service.save_with(0, String::new(), EncryptedIniKey::Global, |_, _, _, _| {
-            called.store(true, Ordering::Release);
-            Ok(EncryptedIniSaveOutcome::Saved)
-        });
-        let failed = service.reload_with(|_| Err(EncryptedIniError::ReadFailed));
+        let stale = service.save(0, String::new(), EncryptedIniKey::Global);
+        fs::remove_file(&fixture.path).expect("remove fixture to simulate read failure");
+        let failed = service.reload();
         let snapshot = service.snapshot().expect("state preserved");
 
         assert_eq!(stale, Err(EncryptedIniServiceError::StaleGeneration));
@@ -409,25 +323,7 @@ mod tests {
                 EncryptedIniError::ReadFailed
             ))
         );
-        assert!(!called.load(Ordering::Acquire));
         assert_eq!(snapshot.generation, opened.generation);
         assert_eq!(snapshot.plaintext, opened.plaintext);
-    }
-
-    #[test]
-    fn poisoned_state_is_sticky_and_never_runs_file_work() {
-        let service = EncryptedIniService::default();
-        service.poison_for_test();
-        let called = AtomicBool::new(false);
-
-        let first = service.open_with(PathBuf::from("private.ini"), |_| {
-            called.store(true, Ordering::Release);
-            Err(EncryptedIniError::ReadFailed)
-        });
-        let second = service.snapshot();
-
-        assert_eq!(first, Err(EncryptedIniServiceError::Unavailable));
-        assert_eq!(second, Err(EncryptedIniServiceError::Unavailable));
-        assert!(!called.load(Ordering::Acquire));
     }
 }

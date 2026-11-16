@@ -2,7 +2,7 @@ use tauri::{State, WebviewWindow, ipc::Channel};
 
 use crate::{
     channels::stream_runtime::{
-        PollingStreamOutput, StreamDeliveryEndpoint, spawn_polling_stream, validate_subscription_id,
+        PollingStreamOutput, subscribe_polling_stream, unsubscribe_stream, validate_subscription_id,
     },
     commands::diagnostics::snapshot,
     contract::{
@@ -24,18 +24,14 @@ pub(crate) fn subscribe_diagnostics(
     console::validate_window(&window)?;
     state.diagnostics_revision()?;
 
-    let stream_kind = StreamKind::Diagnostics;
-    let stream_key = stream_kind.stream_key(&subscription_id);
-    let state = state.inner().clone();
-    let registration = state.reserve_stream(window.label(), &stream_key)?;
-    let stream_generation = registration.generation();
     let mut last_revision = None;
-    spawn_polling_stream(
-        "nte-diagnostics-stream",
-        StreamDeliveryEndpoint::new(on_event),
-        state,
-        registration,
+    subscribe_polling_stream(
+        subscription_id,
+        StreamKind::Diagnostics,
         DIAGNOSTICS_STREAM_INTERVAL_MS,
+        on_event,
+        state.inner(),
+        &window,
         move |state| {
             let Ok(revision) = state.diagnostics_revision() else {
                 return PollingStreamOutput::Stop;
@@ -49,14 +45,7 @@ pub(crate) fn subscribe_diagnostics(
             last_revision = Some(revision);
             PollingStreamOutput::Event(DiagnosticsEvent::Snapshot(next))
         },
-    )?;
-
-    Ok(SubscriptionReceipt::new(
-        subscription_id,
-        stream_kind,
-        stream_generation,
-        DIAGNOSTICS_STREAM_INTERVAL_MS,
-    ))
+    )
 }
 #[tauri::command]
 pub(crate) fn unsubscribe_diagnostics(
@@ -64,11 +53,11 @@ pub(crate) fn unsubscribe_diagnostics(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    console::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::Diagnostics.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::Diagnostics,
+        state.inner(),
+        &window,
+        console::validate_window,
+    )
 }

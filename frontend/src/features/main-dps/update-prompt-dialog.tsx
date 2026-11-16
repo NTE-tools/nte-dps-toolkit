@@ -167,7 +167,7 @@ function UpdatePromptDialog({
     >
       <DialogPortal>
         <DialogBackdrop className="z-[90]" />
-        <DialogPopup className="ui-motion-dialog z-[91] top-1/2 left-1/2 flex max-h-[min(42rem,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl">
+        <DialogPopup className="z-[91] top-1/2 left-1/2 flex max-h-[min(42rem,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border bg-background shadow-xl">
           <header className="flex items-start gap-3 border-b p-5">
             <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
               <Sparkles className="size-5" aria-hidden="true" />
@@ -236,9 +236,7 @@ function UpdatePromptDialog({
                 ? t("Updating...")
                 : prepared?.component === "app"
                   ? t("Install and restart")
-                  : prepared?.component === "mods-plugin"
-                    ? t("Install Mod loader update")
-                    : t("Update now")}
+                  : t("Update now")}
             </Button>
           </footer>
         </DialogPopup>

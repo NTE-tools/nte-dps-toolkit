@@ -3,19 +3,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invokeCommand, type CommandError } from "@/lib/tauri/command-error";
 import type { HitSnapshotReply } from "@/lib/tauri/generated/HitSnapshotReply";
 import type { MainDpsDetailColumns } from "@/lib/tauri/generated/MainDpsDetailColumns";
+import type { MainDpsDetailFilter } from "@/lib/tauri/generated/MainDpsDetailFilter";
 import type { MainDpsDetailSnapshot } from "@/lib/tauri/generated/MainDpsDetailSnapshot";
 import { subscribeStream } from "@/lib/tauri/stream-client";
 
-export type MainDpsDetailFilter =
-  | "all"
-  | "outgoing"
-  | "incoming"
-  | "characterAttributed"
-  | "characterDirect"
-  | "reactionDamage"
-  | "sharedMechanics"
-  | "unattributed"
-  | "qteType";
+export type { MainDpsDetailFilter };
 
 export const mainDpsDetailClient = {
   getHitSnapshot: async (hitId: string, snapshotKey: string) =>

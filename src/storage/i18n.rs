@@ -20,7 +20,6 @@ use std::sync::{LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::sync::{read_or_repair, write_or_repair};
 use crate::storage::resource::{BoundedResourceTextError, read_resource_text_bounded};
 
 const MAX_LOCALE_RESOURCE_BYTES: usize = 1024 * 1024;
@@ -106,7 +105,6 @@ pub enum LocaleLoadDiagnostic {
     InvalidUtf8,
     InvalidJson,
     InvalidShape,
-    StateRecovered,
 }
 
 impl LocaleLoadDiagnostic {
@@ -117,7 +115,6 @@ impl LocaleLoadDiagnostic {
             Self::InvalidUtf8 => "resource_invalid_utf8",
             Self::InvalidJson => "resource_invalid_json",
             Self::InvalidShape => "resource_invalid_shape",
-            Self::StateRecovered => "state_recovered",
         }
     }
 }
@@ -129,17 +126,6 @@ struct Store {
     map: HashMap<String, String>,
     diagnostic: Option<LocaleLoadDiagnostic>,
     auxiliary_diagnostic: Option<LocaleLoadDiagnostic>,
-}
-
-impl Store {
-    fn poison_fallback() -> Self {
-        Self {
-            language: Language::English,
-            map: HashMap::new(),
-            diagnostic: Some(LocaleLoadDiagnostic::StateRecovered),
-            auxiliary_diagnostic: None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -154,14 +140,12 @@ static SIMPLIFIED_CHINESE_OVERLAY: LazyLock<LocaleOverlay> =
 static JAPANESE_OVERLAY: LazyLock<LocaleOverlay> =
     LazyLock::new(|| load_overlay(Language::Japanese));
 
-/// Locale data is a rebuildable projection. If a writer panics, discard the
-/// entire partially-updated projection before allowing any later read/write.
 fn write_rebuildable_store(store: &RwLock<Store>) -> RwLockWriteGuard<'_, Store> {
-    write_or_repair(store, |store| *store = Store::poison_fallback()).0
+    store.write().expect("locale store write lock")
 }
 
 fn read_rebuildable_store(store: &RwLock<Store>) -> RwLockReadGuard<'_, Store> {
-    read_or_repair(store, |store| *store = Store::poison_fallback())
+    store.read().expect("locale store read lock")
 }
 
 /// Load the overlay map for `language`. Missing/invalid files degrade to an empty
@@ -504,28 +488,5 @@ mod tests {
             Some(LocaleLoadDiagnostic::InvalidJson),
             "a later healthy auxiliary lookup must not erase an observed failure"
         );
-    }
-
-    #[test]
-    fn poisoned_locale_store_discards_partial_state_before_reads_continue() {
-        let store = RwLock::new(Store {
-            language: Language::Japanese,
-            map: HashMap::from([("Settings".to_owned(), "partial".to_owned())]),
-            diagnostic: None,
-            auxiliary_diagnostic: None,
-        });
-        let _ = std::panic::catch_unwind(|| {
-            let mut guard = store.write().expect("test locale store");
-            guard.language = Language::Japanese;
-            guard.map.insert("leaked".to_owned(), "value".to_owned());
-            panic!("poison test locale store");
-        });
-
-        let guard = read_rebuildable_store(&store);
-        assert_eq!(guard.language, Language::English);
-        assert!(guard.map.is_empty());
-        assert_eq!(guard.diagnostic, Some(LocaleLoadDiagnostic::StateRecovered));
-        drop(guard);
-        assert!(!store.is_poisoned());
     }
 }

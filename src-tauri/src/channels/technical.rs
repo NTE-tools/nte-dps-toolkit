@@ -2,7 +2,7 @@ use tauri::{State, WebviewWindow, ipc::Channel};
 
 use crate::{
     channels::stream_runtime::{
-        PollingStreamOutput, StreamDeliveryEndpoint, spawn_polling_stream, validate_subscription_id,
+        PollingStreamOutput, subscribe_polling_stream, unsubscribe_stream, validate_subscription_id,
     },
     contract::{CommandError, SubscriptionReceipt, TechnicalEvent, stream::StreamKind},
     state::{AppState, TECHNICAL_STREAM_INTERVAL_MS},
@@ -20,18 +20,14 @@ pub(crate) fn subscribe_technical_state(
     hud::validate_window(&window)?;
     state.snapshot()?;
 
-    let stream_kind = StreamKind::Technical;
-    let stream_key = stream_kind.stream_key(&subscription_id);
-    let state = state.inner().clone();
-    let registration = state.reserve_stream(window.label(), &stream_key)?;
-    let stream_generation = registration.generation();
     let mut last_revision = None;
-    spawn_polling_stream(
-        "nte-technical-stream",
-        StreamDeliveryEndpoint::new(on_event),
-        state,
-        registration,
+    subscribe_polling_stream(
+        subscription_id,
+        StreamKind::Technical,
         TECHNICAL_STREAM_INTERVAL_MS,
+        on_event,
+        state.inner(),
+        &window,
         move |state| {
             let revision = state.stream_revision();
             if !should_emit_snapshot(last_revision, revision) {
@@ -43,14 +39,7 @@ pub(crate) fn subscribe_technical_state(
             last_revision = Some(revision);
             PollingStreamOutput::Event(TechnicalEvent::Snapshot(next))
         },
-    )?;
-
-    Ok(SubscriptionReceipt::new(
-        subscription_id,
-        stream_kind,
-        stream_generation,
-        TECHNICAL_STREAM_INTERVAL_MS,
-    ))
+    )
 }
 
 #[tauri::command]
@@ -59,13 +48,13 @@ pub(crate) fn unsubscribe_technical_state(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    hud::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::Technical.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::Technical,
+        state.inner(),
+        &window,
+        hud::validate_window,
+    )
 }
 
 fn should_emit_snapshot(

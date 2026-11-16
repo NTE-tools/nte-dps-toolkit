@@ -5,7 +5,6 @@ import type { HudConfigSnapshot } from "@/lib/tauri/generated/HudConfigSnapshot"
 import {
   adjacentHudModuleMove,
   hudModuleVisible,
-  settingsSectionPending,
   shouldAcceptSettingsGeneration,
   shouldAcceptSettingsRefresh,
 } from "./settings-view-model";
@@ -50,16 +49,6 @@ describe("Settings view model", () => {
     });
     expect(adjacentHudModuleMove(order, "title", "up")).toBeNull();
     expect(adjacentHudModuleMove(order, "timeline", "down")).toBeNull();
-  });
-
-  it("blocks every settings section while a serialized mutation is pending", () => {
-    expect(settingsSectionPending("update-preferences", "update")).toBe(true);
-    expect(settingsSectionPending("update-preferences", "interface")).toBe(
-      true,
-    );
-    expect(settingsSectionPending("module:timeline", "hud-modules")).toBe(true);
-    expect(settingsSectionPending("module:timeline", "capture")).toBe(true);
-    expect(settingsSectionPending(null, "capture")).toBe(false);
   });
 
   it("drops duplicate and stale settings generations", () => {

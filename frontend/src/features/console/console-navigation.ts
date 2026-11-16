@@ -1,12 +1,12 @@
 export const CONSOLE_PAGE_IDS = [
-  "settings",
-  "shortcuts",
   "history",
   "timeline",
   "skills",
+  "character-data",
   "empty-curtain",
   "mod-studio",
-  "character-data",
+  "settings",
+  "shortcuts",
   "encrypted-ini",
   "packets",
   "diagnostics",
@@ -15,19 +15,14 @@ export const CONSOLE_PAGE_IDS = [
 export type ConsolePageId = (typeof CONSOLE_PAGE_IDS)[number];
 
 export const DEFAULT_CONSOLE_PAGE: ConsolePageId = "settings";
-export const CONSOLE_SIDEBAR_STORAGE_KEY = "nte.console.sidebar-collapsed.v1";
-export const CONSOLE_FAVORITES_STORAGE_KEY = "nte.console.favorite-pages.v1";
-export const DEFAULT_CONSOLE_FAVORITES: readonly ConsolePageId[] = [
+const CONSOLE_SIDEBAR_STORAGE_KEY = "nte.console.sidebar-collapsed.v1";
+const CONSOLE_FAVORITES_STORAGE_KEY = "nte.console.favorite-pages.v1";
+const DEFAULT_CONSOLE_FAVORITES: readonly ConsolePageId[] = [
   "settings",
   "history",
 ];
 
-interface ConsolePreferenceStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
-export type ConsoleShortcut = "command-palette" | "previous-page" | "next-page";
+type ConsoleShortcut = "command-palette" | "previous-page" | "next-page";
 
 interface ConsoleShortcutInput {
   key: string;
@@ -85,9 +80,8 @@ export function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   );
 }
 
-export function readConsoleSidebarCollapsed(
-  storage: ConsolePreferenceStorage | null = browserStorage(),
-): boolean {
+export function readConsoleSidebarCollapsed(): boolean {
+  const storage = browserStorage();
   if (storage === null) return false;
   try {
     return storage.getItem(CONSOLE_SIDEBAR_STORAGE_KEY) === "true";
@@ -96,10 +90,8 @@ export function readConsoleSidebarCollapsed(
   }
 }
 
-export function writeConsoleSidebarCollapsed(
-  collapsed: boolean,
-  storage: ConsolePreferenceStorage | null = browserStorage(),
-): void {
+export function writeConsoleSidebarCollapsed(collapsed: boolean): void {
+  const storage = browserStorage();
   if (storage === null) return;
   try {
     storage.setItem(CONSOLE_SIDEBAR_STORAGE_KEY, String(collapsed));
@@ -108,9 +100,8 @@ export function writeConsoleSidebarCollapsed(
   }
 }
 
-export function readConsoleFavoritePages(
-  storage: ConsolePreferenceStorage | null = browserStorage(),
-): ConsolePageId[] {
+export function readConsoleFavoritePages(): ConsolePageId[] {
+  const storage = browserStorage();
   if (storage === null) return [...DEFAULT_CONSOLE_FAVORITES];
   try {
     const raw = storage.getItem(CONSOLE_FAVORITES_STORAGE_KEY);
@@ -134,8 +125,8 @@ export function readConsoleFavoritePages(
 
 export function writeConsoleFavoritePages(
   pages: readonly ConsolePageId[],
-  storage: ConsolePreferenceStorage | null = browserStorage(),
 ): void {
+  const storage = browserStorage();
   if (storage === null) return;
   try {
     storage.setItem(CONSOLE_FAVORITES_STORAGE_KEY, JSON.stringify(pages));
@@ -144,7 +135,7 @@ export function writeConsoleFavoritePages(
   }
 }
 
-function browserStorage(): ConsolePreferenceStorage | null {
+function browserStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
     return window.localStorage;

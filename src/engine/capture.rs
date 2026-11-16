@@ -31,13 +31,13 @@ use serde::{
     ser::{SerializeMap, SerializeSeq},
 };
 
-use crate::core::sync::{lock_or_repair, wait_or_repair};
 use crate::engine::model::{
     AbyssEvent, AbyssHalf, COMBAT_CLOCK_RELEVANT_PAUSE_MASK, CharacterInfo,
-    CombatClockRuntimeHealth, CombatState, DpsTimeBasis, EmptyCurtainCharacter, EmptyCurtainItem,
-    EmptyCurtainPlacement, EngineEvent, Hit, HitCharacterSource, HitDamageCorrection, HitDirection,
-    HitFollowUp, HtItemNetId, ModScriptEvent, ModScriptEventPhase, PacketDebug, PacketObservation,
-    PartyCombatState, TimeStopEvent, UnattributedServerDamage,
+    CombatClockRuntimeHealth, CombatClockTransitionSnapshot, CombatState, DpsTimeBasis,
+    EmptyCurtainCharacter, EmptyCurtainItem, EmptyCurtainPlacement, EngineEvent, Hit,
+    HitCharacterSource, HitDamageCorrection, HitDirection, HitFollowUp, HtItemNetId,
+    ModScriptEvent, ModScriptEventPhase, PacketDebug, PacketObservation, PartyCombatState,
+    TimeStopEvent, UnattributedServerDamage,
 };
 use crate::engine::parser::{
     AbilityCatalog, DamageDisplayType, DamageRecordEncoding, ENEMY_CATALOG_PATH,
@@ -55,7 +55,6 @@ use crate::engine::parser::{
     parse_empty_curtain_items, parse_equipment_slots, parse_gameplay_effects,
     parse_server_damage_settlements, valid_item_net_id, validate_empty_curtain_snapshot,
 };
-use crate::platform::mods_plugin::CombatClockTransitionSnapshot;
 use crate::storage::io_util::atomic_write_file;
 
 use crate::engine::protocol::{
@@ -385,14 +384,12 @@ impl CaptureFrameByteBudget {
                 self.high_water
             ));
         }
-        let mut state = self.lock_state()?;
+        let mut state = self.state.lock().expect("capture frame byte budget lock");
         while state.receiver_connected && bytes > self.high_water - state.reserved {
-            let recovered;
-            (state, recovered) =
-                wait_or_repair(&self.available, &self.state, state, disconnect_byte_budget);
-            if recovered {
-                return Err(self.byte_budget_unavailable());
-            }
+            state = self
+                .available
+                .wait(state)
+                .expect("capture frame byte budget wait");
         }
         if !state.receiver_connected {
             return Err("capture parser thread stopped unexpectedly".to_owned());
@@ -405,46 +402,28 @@ impl CaptureFrameByteBudget {
         })
     }
 
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, CaptureFrameByteBudgetState>, String> {
-        let (state, recovered) = lock_or_repair(&self.state, disconnect_byte_budget);
-        if recovered {
-            return Err(self.byte_budget_unavailable());
-        }
-        Ok(state)
-    }
-
-    fn byte_budget_unavailable(&self) -> String {
-        self.available.notify_all();
-        "capture frame queue byte budget became unavailable".to_owned()
-    }
-
     fn release(&self, bytes: usize) {
-        let (mut state, recovered) = lock_or_repair(&self.state, |state| {
-            state.reserved = 0;
-            state.receiver_connected = false;
-        });
-        if !recovered {
-            // Reservations taken before a poison reset outlive the reset to 0.
-            state.reserved = state.reserved.saturating_sub(bytes);
-        }
+        let mut state = self.state.lock().expect("capture frame byte budget lock");
+        debug_assert!(state.reserved >= bytes);
+        state.reserved -= bytes;
         drop(state);
         self.available.notify_all();
     }
 
     fn disconnect_receiver(&self) {
-        disconnect_byte_budget(&mut lock_or_repair(&self.state, |_| {}).0);
+        self.state
+            .lock()
+            .expect("capture frame byte budget lock")
+            .receiver_connected = false;
         self.available.notify_all();
     }
 
     fn observed_high_water(&self) -> usize {
         self.state
             .lock()
-            .map_or(self.high_water, |state| state.observed_high_water)
+            .expect("capture frame byte budget lock")
+            .observed_high_water
     }
-}
-
-fn disconnect_byte_budget(state: &mut CaptureFrameByteBudgetState) {
-    state.receiver_connected = false;
 }
 
 impl Drop for CaptureFrameByteReservation {
@@ -822,9 +801,38 @@ impl Drop for CaptureHandle {
     }
 }
 
+const RAW_CAPTURE_QUEUE_CAPACITY: usize = 4_096;
+
+struct RawCapturePacket {
+    timestamp: Duration,
+    original_len: u32,
+    data: Vec<u8>,
+}
+
+struct RawCaptureWorker {
+    sender: Option<Sender<RawCapturePacket>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl RawCaptureWorker {
+    fn shutdown(&mut self) {
+        self.sender = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for RawCaptureWorker {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[derive(Clone)]
 pub struct RawCaptureBuffer {
     inner: Arc<Mutex<RawCaptureData>>,
+    worker: Arc<Mutex<Option<RawCaptureWorker>>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -838,10 +846,10 @@ pub struct RawCaptureSnapshot {
 
 struct RawCaptureData {
     path: Option<PathBuf>,
-    writer: Option<RawCaptureWriter>,
     packet_count: u64,
     captured_bytes: u64,
     write_error: Option<String>,
+    writing: bool,
 }
 
 impl RawCaptureBuffer {
@@ -851,51 +859,126 @@ impl RawCaptureBuffer {
         Self {
             inner: Arc::new(Mutex::new(RawCaptureData {
                 path,
-                writer: None,
                 packet_count: 0,
                 captured_bytes: 0,
                 write_error: None,
+                writing: false,
             })),
+            worker: Arc::new(Mutex::new(None)),
         }
     }
 
     fn initialize(&self, device: &CaptureDevice, link_type: CaptureLinkType) {
-        let path = self.inner.lock().ok().and_then(|capture| {
-            if capture.writer.is_none() && capture.write_error.is_none() {
-                capture.path.clone()
-            } else {
-                None
+        let path = {
+            let Ok(mut capture) = self.inner.lock() else {
+                return;
+            };
+            if capture.writing || capture.write_error.is_some() {
+                return;
             }
-        });
-        let Some(path) = path else {
-            return;
+            let Some(path) = capture.path.clone() else {
+                return;
+            };
+            capture.writing = true;
+            path
         };
-        let result = RawCaptureWriter::create(&path, device, link_type);
-        let Ok(mut capture) = self.inner.lock() else {
-            return;
-        };
-        match result {
-            Ok(writer) => capture.writer = Some(writer),
-            Err(error) => capture.write_error = Some(error),
+        let (sender, receiver) = bounded::<RawCapturePacket>(RAW_CAPTURE_QUEUE_CAPACITY);
+        let device = device.clone();
+        let inner = Arc::clone(&self.inner);
+        match thread::Builder::new()
+            .name("nte-raw-capture-writer".to_owned())
+            .spawn(move || {
+                let mut writer = match RawCaptureWriter::create(&path, &device, link_type) {
+                    Ok(writer) => writer,
+                    Err(error) => {
+                        if let Ok(mut capture) = inner.lock() {
+                            capture.write_error = Some(error);
+                            capture.writing = false;
+                        }
+                        return;
+                    }
+                };
+                let mut write_error = None;
+                while let Ok(packet) = receiver.recv() {
+                    match writer.write_packet(packet.timestamp, packet.original_len, &packet.data) {
+                        Ok(()) => {
+                            if let Ok(mut capture) = inner.lock() {
+                                capture.packet_count += 1;
+                                capture.captured_bytes += packet.data.len() as u64;
+                            }
+                        }
+                        Err(error) => {
+                            write_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if let Err(error) = writer.finish()
+                    && write_error.is_none()
+                {
+                    write_error = Some(error);
+                }
+                if let Ok(mut capture) = inner.lock() {
+                    if let Some(error) = write_error
+                        && capture.write_error.is_none()
+                    {
+                        capture.write_error = Some(error);
+                    }
+                    capture.writing = false;
+                }
+            }) {
+            Ok(thread) => {
+                if let Ok(mut worker) = self.worker.lock() {
+                    *worker = Some(RawCaptureWorker {
+                        sender: Some(sender),
+                        thread: Some(thread),
+                    });
+                }
+            }
+            Err(error) => {
+                if let Ok(mut capture) = self.inner.lock() {
+                    capture.write_error =
+                        Some(format!("failed to start raw capture writer: {error}"));
+                    capture.writing = false;
+                }
+            }
         }
     }
 
     fn push(&self, timestamp: Duration, original_len: u32, packet: &[u8]) {
-        if let Ok(mut capture) = self.inner.lock() {
-            let result = capture
-                .writer
-                .as_mut()
-                .map(|writer| writer.write_packet(timestamp, original_len, packet));
-            match result {
-                Some(Ok(())) => {
-                    capture.packet_count += 1;
-                    capture.captured_bytes += packet.len() as u64;
+        let sender = self
+            .worker
+            .lock()
+            .ok()
+            .and_then(|worker| worker.as_ref().and_then(|active| active.sender.clone()));
+        let Some(sender) = sender else {
+            return;
+        };
+        let packet = RawCapturePacket {
+            timestamp,
+            original_len,
+            data: packet.to_vec(),
+        };
+        match sender.try_send(packet) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                if let Ok(mut capture) = self.inner.lock()
+                    && capture.write_error.is_none()
+                {
+                    capture.write_error = Some("raw capture writer queue overflowed".to_owned());
                 }
-                Some(Err(error)) => {
-                    capture.write_error = Some(error);
-                    capture.writer = None;
+                if let Ok(mut worker) = self.worker.lock()
+                    && let Some(active) = worker.as_mut()
+                {
+                    active.sender = None;
                 }
-                None => {}
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                if let Ok(mut worker) = self.worker.lock()
+                    && let Some(active) = worker.as_mut()
+                {
+                    active.sender = None;
+                }
             }
         }
     }
@@ -917,7 +1000,7 @@ impl RawCaptureBuffer {
                 packet_count: capture.packet_count,
                 captured_bytes: capture.captured_bytes,
                 write_error: capture.write_error.is_some(),
-                writing: capture.writer.is_some(),
+                writing: capture.writing,
             },
         )
     }
@@ -931,33 +1014,32 @@ impl RawCaptureBuffer {
     }
 
     fn finish(&self) {
-        let Ok(mut capture) = self.inner.lock() else {
-            return;
-        };
-        if let Some(writer) = capture.writer.take()
-            && let Err(error) = writer.finish()
-        {
-            capture.write_error = Some(error);
+        let worker = self.worker.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(mut worker) = worker {
+            worker.shutdown();
         }
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<(u64, u64), String> {
-        let capture = self
-            .inner
-            .lock()
-            .map_err(|_| "raw capture lock poisoned".to_owned())?;
-        if capture.writer.is_some() {
-            return Err("raw capture is still being written; stop capture first".to_owned());
-        }
-        if let Some(error) = &capture.write_error {
-            return Err(format!("raw capture write failed: {error}"));
-        }
-        let source = capture
-            .path
-            .as_ref()
-            .ok_or_else(|| "raw capture is disabled".to_owned())?;
+        let (source, packet_count, captured_bytes) = {
+            let capture = self
+                .inner
+                .lock()
+                .map_err(|_| "raw capture state unavailable".to_owned())?;
+            if capture.writing {
+                return Err("raw capture is still being written; stop capture first".to_owned());
+            }
+            if let Some(error) = &capture.write_error {
+                return Err(format!("raw capture write failed: {error}"));
+            }
+            let source = capture
+                .path
+                .clone()
+                .ok_or_else(|| "raw capture is disabled".to_owned())?;
+            (source, capture.packet_count, capture.captured_bytes)
+        };
         if path != source {
-            std::fs::copy(source, path).map_err(|error| {
+            std::fs::copy(&source, path).map_err(|error| {
                 format!(
                     "failed to copy raw capture {} to {}: {error}",
                     source.display(),
@@ -965,7 +1047,7 @@ impl RawCaptureBuffer {
                 )
             })?;
         }
-        Ok((capture.packet_count, capture.captured_bytes))
+        Ok((packet_count, captured_bytes))
     }
 }
 
@@ -3149,11 +3231,9 @@ impl EmptyCurtainDecoder {
                 Vec::new(),
             ),
         };
-        if !module_placements.is_empty() {
-            let state = self
-                .connections
-                .get_mut(connection)
-                .expect("inventory snapshot connection must remain present");
+        if !module_placements.is_empty()
+            && let Some(state) = self.connections.get_mut(connection)
+        {
             for (equipment, placement) in module_placements {
                 if !state.module_placements.contains_key(&equipment)
                     && state.module_placements.len() >= MAX_INVENTORY_ITEMS
@@ -3200,10 +3280,9 @@ impl EmptyCurtainDecoder {
             return false;
         }
         let mut changed = false;
-        let state = self
-            .connections
-            .get(connection)
-            .expect("active inventory connection must remain present");
+        let Some(state) = self.connections.get(connection) else {
+            return false;
+        };
         for mut item in parsed {
             item.equipped_character_id = item
                 .character_net_id
@@ -3238,10 +3317,9 @@ impl EmptyCurtainDecoder {
         if self.active_connection.as_ref() != Some(connection) {
             return false;
         }
-        let state = self
-            .connections
-            .get_mut(connection)
-            .expect("active inventory connection must remain present");
+        let Some(state) = self.connections.get_mut(connection) else {
+            return false;
+        };
         let mut changed = false;
         for (id, item_id) in removals {
             if self
@@ -3264,16 +3342,16 @@ impl EmptyCurtainDecoder {
     ) -> InventoryPacketResult {
         if !self.connections.contains_key(&connection) {
             while self.connections.len() >= MAX_INVENTORY_CONNECTIONS {
-                let eviction_index = self
+                let Some(eviction_index) = self
                     .connection_order
                     .iter()
                     .position(|stored| self.active_connection.as_ref() != Some(stored))
-                    .expect("a full inventory connection cache must contain a non-active entry");
-                let oldest = self
-                    .connection_order
-                    .remove(eviction_index)
-                    .expect("the selected inventory connection must remain in the order queue");
-                self.connections.remove(&oldest);
+                else {
+                    break;
+                };
+                if let Some(oldest) = self.connection_order.remove(eviction_index) {
+                    self.connections.remove(&oldest);
+                }
             }
             self.connection_order.push_back(connection.clone());
             self.connections
@@ -3282,19 +3360,18 @@ impl EmptyCurtainDecoder {
 
         let raw_character_ids =
             parse_empty_curtain_character_owners(&packet.payload, packet.payload_bit_len);
-        let raw_character_mapping_changed = {
-            let state = self
-                .connections
-                .get_mut(&connection)
-                .expect("new or existing inventory connection must be present");
-            let mut changed = false;
-            for (&net_id, &character_id) in &raw_character_ids {
-                if state.character_ids.insert(net_id, character_id) != Some(character_id) {
-                    changed = true;
+        let raw_character_mapping_changed =
+            if let Some(state) = self.connections.get_mut(&connection) {
+                let mut changed = false;
+                for (&net_id, &character_id) in &raw_character_ids {
+                    if state.character_ids.insert(net_id, character_id) != Some(character_id) {
+                        changed = true;
+                    }
                 }
-            }
-            changed
-        };
+                changed
+            } else {
+                false
+            };
         let initial_additions = if self.active_connection.is_none() {
             parse_empty_curtain_item_additions(
                 &packet.payload,
@@ -3325,11 +3402,9 @@ impl EmptyCurtainDecoder {
         // Unsupported Bunch modes may still carry raw records, but their packet IDs
         // must not seed or advance the inventory fragment clock. Supported packets
         // without inventory Bunches still advance that clock and expire stale fragments.
-        let (streams, bunches_recognized) = if packet.mode == 0 {
-            let state = self
-                .connections
-                .get_mut(&connection)
-                .expect("new or existing inventory connection must be present");
+        let (streams, bunches_recognized) = if packet.mode == 0
+            && let Some(state) = self.connections.get_mut(&connection)
+        {
             let known_channels = state.bunch_reassembler.known_channels().collect::<Vec<_>>();
             let bunches = parse_inventory_bunches(packet, &known_channels);
             let recognized = !bunches.is_empty();
@@ -3340,13 +3415,12 @@ impl EmptyCurtainDecoder {
 
         let mut items_changed = false;
         let mut characters_changed = activated_by_raw_items;
-        if raw_character_mapping_changed && self.active_connection.as_ref() == Some(&connection) {
+        if raw_character_mapping_changed
+            && self.active_connection.as_ref() == Some(&connection)
+            && let Some(connection_state) = self.connections.get(&connection)
+        {
             characters_changed = true;
-            let character_ids = &self
-                .connections
-                .get(&connection)
-                .expect("active inventory connection must remain present")
-                .character_ids;
+            let character_ids = &connection_state.character_ids;
             for item in self.items.values_mut() {
                 let character_id = item
                     .character_net_id
@@ -3386,10 +3460,9 @@ impl EmptyCurtainDecoder {
                 continue;
             }
             let character_mapping_changed = {
-                let state = self
-                    .connections
-                    .get_mut(&connection)
-                    .expect("inventory connection must remain present while processing streams");
+                let Some(state) = self.connections.get_mut(&connection) else {
+                    continue;
+                };
                 let mut changed = false;
                 for (&net_id, &character_id) in &stream_character_ids {
                     if state.character_ids.insert(net_id, character_id) != Some(character_id) {
@@ -3428,18 +3501,16 @@ impl EmptyCurtainDecoder {
                 self.active_connection = Some(connection.clone());
                 characters_changed = true;
                 if shares_character_identity {
-                    let character_ids = &self
-                        .connections
-                        .get(&connection)
-                        .expect("active inventory connection must remain present")
-                        .character_ids;
-                    for item in self.items.values_mut() {
-                        let character_id = item
-                            .character_net_id
-                            .and_then(|net_id| character_ids.get(&net_id).copied());
-                        if item.equipped_character_id != character_id {
-                            item.equipped_character_id = character_id;
-                            items_changed = true;
+                    if let Some(connection_state) = self.connections.get(&connection) {
+                        let character_ids = &connection_state.character_ids;
+                        for item in self.items.values_mut() {
+                            let character_id = item
+                                .character_net_id
+                                .and_then(|net_id| character_ids.get(&net_id).copied());
+                            if item.equipped_character_id != character_id {
+                                item.equipped_character_id = character_id;
+                                items_changed = true;
+                            }
                         }
                     }
                 } else {
@@ -3452,10 +3523,9 @@ impl EmptyCurtainDecoder {
             }
             completed_stream_removals.extend(removals.iter().cloned());
             items_changed |= self.apply_item_removals(&connection, removals);
-            let connection_state = self
-                .connections
-                .get(&connection)
-                .expect("active inventory connection must remain present");
+            let Some(connection_state) = self.connections.get(&connection) else {
+                continue;
+            };
             let character_ids = &connection_state.character_ids;
             let module_placements = &connection_state.module_placements;
             if character_mapping_changed {
@@ -3546,14 +3616,17 @@ impl EmptyCurtainDecoder {
                 .active_connection
                 .as_ref()
                 .and_then(|connection| self.connections.get(connection))
-                .expect("changed inventory must have an active connection")
-                .character_ids
-                .iter()
-                .map(|(net_id, character_id)| EmptyCurtainCharacter {
-                    net_id: *net_id,
-                    character_id: *character_id,
+                .map(|state| {
+                    state
+                        .character_ids
+                        .iter()
+                        .map(|(net_id, character_id)| EmptyCurtainCharacter {
+                            net_id: *net_id,
+                            character_id: *character_id,
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect::<Vec<_>>();
+                .unwrap_or_default();
             characters.sort_by_key(|character| {
                 (
                     character.character_id,
@@ -4257,29 +4330,30 @@ impl Default for PacketDecoder {
 }
 
 impl PacketDecoder {
-    fn enable_exact_mode(&mut self, sender: &EngineEventSink) {
+    fn enable_exact_mode(&mut self, sender: &EngineEventSink) -> Result<(), EngineEventSendError> {
         self.exact_mode = true;
-        let _ = sender.send(EngineEvent::PacketInventory {
+        sender.send(EngineEvent::PacketInventory {
             items: vec![],
             characters: vec![],
-        });
+        })?;
         match crate::engine::settlement::runtime::Runtime::from_environment() {
             Ok(Some(runtime)) => self.exact_runtime = Some(runtime),
             Ok(None) => match crate::engine::settlement::automatic::Automatic::bundled() {
                 Ok(automatic) => {
                     self.exact_auto = Some(automatic);
-                    let _ = sender.send(EngineEvent::Warning(
+                    sender.send(EngineEvent::Warning(
                         crate::engine::settlement::automatic::WAITING.into(),
-                    ));
+                    ))?;
                 }
                 Err(code) => {
-                    let _ = sender.send(EngineEvent::Error(code.into()));
+                    sender.send(EngineEvent::Error(code.into()))?;
                 }
             },
             Err(code) => {
-                let _ = sender.send(EngineEvent::Error(code.into()));
+                sender.send(EngineEvent::Error(code.into()))?;
             }
         }
+        Ok(())
     }
 
     fn with_ability_catalog(
@@ -4604,8 +4678,8 @@ impl PacketDecoder {
         hits: impl IntoIterator<Item = Hit>,
         characters: &HashMap<u32, CharacterInfo>,
         sender: &EngineEventSink,
-    ) {
-        self.emit_hits_inner(hits, characters, sender, true);
+    ) -> Result<(), EngineEventSendError> {
+        self.emit_hits_inner(hits, characters, sender, true)
     }
 
     fn emit_preobserved_hits(
@@ -4613,8 +4687,8 @@ impl PacketDecoder {
         hits: impl IntoIterator<Item = Hit>,
         characters: &HashMap<u32, CharacterInfo>,
         sender: &EngineEventSink,
-    ) {
-        self.emit_hits_inner(hits, characters, sender, false);
+    ) -> Result<(), EngineEventSendError> {
+        self.emit_hits_inner(hits, characters, sender, false)
     }
 
     fn emit_hits_inner(
@@ -4623,7 +4697,7 @@ impl PacketDecoder {
         _characters: &HashMap<u32, CharacterInfo>,
         sender: &EngineEventSink,
         observe_server_damage: bool,
-    ) {
+    ) -> Result<(), EngineEventSendError> {
         for hit in hits {
             if is_enemy_death_settlement_hit(&hit) {
                 continue;
@@ -4631,11 +4705,12 @@ impl PacketDecoder {
             let max_hp_reduction_correction = observe_server_damage
                 .then(|| self.observe_server_damage_hit(&hit))
                 .flatten();
-            let _ = sender.send(EngineEvent::Hit(Box::new(hit)));
+            sender.send(EngineEvent::Hit(Box::new(hit)))?;
             if let Some(correction) = max_hp_reduction_correction {
-                let _ = sender.send(EngineEvent::HitDamageCorrection(correction));
+                sender.send(EngineEvent::HitDamageCorrection(correction))?;
             }
         }
+        Ok(())
     }
 
     fn observe_server_damage_hits<'a>(
@@ -5892,25 +5967,26 @@ fn set_hit_character(hit: &mut Hit, new_char_id: u32, characters: &HashMap<u32, 
 }
 
 impl PacketDecoder {
-    fn flush_inventory(&mut self, sender: &EngineEventSink) {
+    fn flush_inventory(&mut self, sender: &EngineEventSink) -> Result<(), EngineEventSendError> {
         match self.exact_inventory.finish() {
             Ok(Some(update)) => {
-                let _ = sender.send(EngineEvent::PacketInventory {
+                sender.send(EngineEvent::PacketInventory {
                     items: update.items,
                     characters: update.characters,
-                });
+                })?;
             }
             Err(_) => {
-                let _ = sender.send(EngineEvent::Warning(
+                sender.send(EngineEvent::Warning(
                     "exact_inventory_incomplete_capture".into(),
-                ));
-                let _ = sender.send(EngineEvent::PacketInventory {
+                ))?;
+                sender.send(EngineEvent::PacketInventory {
                     items: vec![],
                     characters: vec![],
-                });
+                })?;
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn process_capture_frame(
@@ -5920,7 +5996,7 @@ impl PacketDecoder {
         include_incoming: bool,
         characters: &HashMap<u32, CharacterInfo>,
         sender: &EngineEventSink,
-    ) {
+    ) -> Result<(), EngineEventSendError> {
         let (timestamp, capture_timestamp) = match packet.timestamp {
             FrameTimestamp::Known(timestamp) => (timestamp, Some(timestamp)),
             FrameTimestamp::Unknown => (0.0, None),
@@ -5928,10 +6004,10 @@ impl PacketDecoder {
         let Some((src, src_port, dst, dst_port, payload)) =
             parse_udp_ipv4(packet.link_type, packet.data)
         else {
-            return;
+            return Ok(());
         };
         if local_ip.is_some_and(|ip| src != ip && dst != ip) {
-            return;
+            return Ok(());
         }
         // Drop a frame already reported by the capture layer so its damage
         // records are not counted a second time. See [`FrameDedup`].
@@ -5939,7 +6015,7 @@ impl PacketDecoder {
             .frame_dedup
             .is_duplicate(packet.data, capture_timestamp)
         {
-            return;
+            return Ok(());
         }
         let frame = FrameContext {
             timestamp,
@@ -5951,11 +6027,11 @@ impl PacketDecoder {
             include_incoming,
             characters,
         };
-        let exact_components = self.observe_exact_settlements(&frame, sender);
+        let exact_components = self.observe_exact_settlements(&frame, sender)?;
         let expired_hits = self.take_expired_ambiguous_hits(timestamp);
-        self.emit_hits(expired_hits, characters, sender);
+        self.emit_hits(expired_hits, characters, sender)?;
         let expired_targetless_hits = self.take_expired_targetless_hits(timestamp);
-        self.emit_hits(expired_targetless_hits, characters, sender);
+        self.emit_hits(expired_targetless_hits, characters, sender)?;
 
         let decoded_payload = match self.packet_emission {
             PacketEmissionMode::FullDebug => decode_payload_text_filtered(payload, |_| true),
@@ -5978,7 +6054,7 @@ impl PacketDecoder {
         let targets = self.parse_frame_target_updates(&frame, &transport, frame_hits.outgoing);
         let resolved_target_hits = self.resolve_frame_targets(timestamp, &targets);
         let accepted = prepared_hits.emit.len() + exact_components + resolved_target_hits.len();
-        let inventory_recognized = self.observe_frame_inventory(&frame, sender);
+        let inventory_recognized = self.observe_frame_inventory(&frame, sender)?;
         let equipment_slots = frame_equipment_slots(
             payload,
             transport.single_bunch.as_ref(),
@@ -6000,7 +6076,7 @@ impl PacketDecoder {
                 decoded_payload.has_readable_text,
             )
         {
-            return;
+            return Ok(());
         }
         let reconciliation = self.reconcile_frame_damage(
             timestamp,
@@ -6009,9 +6085,9 @@ impl PacketDecoder {
         );
         match self.packet_emission {
             PacketEmissionMode::SummaryOnly => {
-                let _ = sender.send(EngineEvent::PacketObservation(PacketObservation {
+                sender.send(EngineEvent::PacketObservation(PacketObservation {
                     parsed_hits: accepted,
-                }));
+                }))?;
             }
             PacketEmissionMode::FullDebug => {
                 let note = self.frame_debug_note(
@@ -6023,7 +6099,7 @@ impl PacketDecoder {
                     &equipment_slots,
                     &decoded_payload.text,
                 );
-                let _ = send_packet_debug_events(
+                send_packet_debug_events(
                     sender,
                     PacketDebug {
                         timestamp,
@@ -6041,24 +6117,24 @@ impl PacketDecoder {
                         payload_hex: hex::encode(payload),
                         decoded_text: decoded_payload.text,
                     },
-                );
+                )?;
             }
         }
-        self.emit_preobserved_hits(resolved_target_hits, characters, sender);
-        self.emit_preobserved_hits(prepared_hits.emit, characters, sender);
+        self.emit_preobserved_hits(resolved_target_hits, characters, sender)?;
+        self.emit_preobserved_hits(prepared_hits.emit, characters, sender)?;
         for event in abyss_events {
-            let _ = sender.send(EngineEvent::Abyss(event));
+            sender.send(EngineEvent::Abyss(event))?;
         }
         for follow_up in reconciliation.follow_ups {
-            let _ = sender.send(EngineEvent::HitFollowUp(follow_up));
+            sender.send(EngineEvent::HitFollowUp(follow_up))?;
         }
         for correction in reconciliation.corrections {
-            let _ = sender.send(EngineEvent::HitDamageCorrection(correction));
+            sender.send(EngineEvent::HitDamageCorrection(correction))?;
         }
         for observation in reconciliation.unattributed {
-            let _ = sender.send(EngineEvent::UnattributedServerDamage(observation));
+            sender.send(EngineEvent::UnattributedServerDamage(observation))?;
         }
-        self.emit_hits(reconciliation.residual_hits, characters, sender);
+        self.emit_hits(reconciliation.residual_hits, characters, sender)
     }
 
     /// Feeds the frame to the exact settlement runtimes and returns how many
@@ -6067,7 +6143,7 @@ impl PacketDecoder {
         &mut self,
         frame: &FrameContext<'_>,
         sender: &EngineEventSink,
-    ) -> usize {
+    ) -> Result<usize, EngineEventSendError> {
         let (src, src_port) = frame.source;
         let (dst, dst_port) = frame.destination;
         let mut exact_components = 0;
@@ -6085,19 +6161,19 @@ impl PacketDecoder {
                 frame.include_incoming,
             );
             for projection in projections {
-                let _ = sender.send(EngineEvent::ExactSettlement(Box::new(projection)));
+                sender.send(EngineEvent::ExactSettlement(Box::new(projection)))?;
             }
             if automatic.ready && !was_ready {
-                let _ = sender.send(EngineEvent::Status(
+                sender.send(EngineEvent::Status(
                     crate::engine::settlement::automatic::READY.into(),
-                ));
+                ))?;
             } else if was_ready && !automatic.ready {
-                let _ = sender.send(EngineEvent::Warning(
+                sender.send(EngineEvent::Warning(
                     crate::engine::settlement::automatic::WAITING.into(),
-                ));
+                ))?;
             }
             if let Some(code) = automatic.warning {
-                let _ = sender.send(EngineEvent::Warning(code.into()));
+                sender.send(EngineEvent::Warning(code.into()))?;
             }
             exact_components = automatic.last_settlement_components;
         }
@@ -6114,19 +6190,19 @@ impl PacketDecoder {
             ) {
                 Ok(projections) => {
                     for p in projections {
-                        let _ = sender.send(EngineEvent::ExactSettlement(Box::new(p)));
+                        sender.send(EngineEvent::ExactSettlement(Box::new(p)))?;
                     }
                 }
                 Err(code) => {
-                    let _ = sender.send(EngineEvent::Error(code.into()));
+                    sender.send(EngineEvent::Error(code.into()))?;
                 }
             }
             if let Some(code) = runtime.warning {
-                let _ = sender.send(EngineEvent::Warning(code.into()));
+                sender.send(EngineEvent::Warning(code.into()))?;
             }
             exact_components = runtime.last_settlement_components;
         }
-        exact_components
+        Ok(exact_components)
     }
 
     fn observe_frame_transport(&mut self, frame: &FrameContext<'_>) -> FrameTransport {
@@ -6563,7 +6639,7 @@ impl PacketDecoder {
         &mut self,
         frame: &FrameContext<'_>,
         sender: &EngineEventSink,
-    ) -> bool {
+    ) -> Result<bool, EngineEventSendError> {
         let (src, src_port) = frame.source;
         let (dst, dst_port) = frame.destination;
         // Inventory direction must not depend on byte-scanned character guesses.
@@ -6573,7 +6649,7 @@ impl PacketDecoder {
                 dst == local && src != local
             });
         if !inbound {
-            return false;
+            return Ok(false);
         }
         match self.exact_inventory.datagram(
             format!("{src}:{src_port}"),
@@ -6582,22 +6658,22 @@ impl PacketDecoder {
             frame.timestamp,
         ) {
             Ok(Some(update)) => {
-                let _ = sender.send(EngineEvent::PacketInventory {
+                sender.send(EngineEvent::PacketInventory {
                     items: update.items,
                     characters: update.characters,
-                });
-                true
+                })?;
+                Ok(true)
             }
-            Ok(None) => false,
+            Ok(None) => Ok(false),
             Err(_) => {
-                let _ = sender.send(EngineEvent::Warning(
+                sender.send(EngineEvent::Warning(
                     "exact_inventory_unavailable_or_unsupported_update".into(),
-                ));
-                let _ = sender.send(EngineEvent::PacketInventory {
+                ))?;
+                sender.send(EngineEvent::PacketInventory {
                     items: vec![],
                     characters: vec![],
-                });
-                true
+                })?;
+                Ok(true)
             }
         }
     }
@@ -6945,13 +7021,15 @@ pub fn start_capture(
             use_server_damage_calibration,
             resources,
             sender: &sender,
-            stop: &thread_stop,
+            stop: Arc::clone(&thread_stop),
             raw_capture: &thread_raw_capture,
             packet_emission,
         });
         thread_raw_capture.finish();
-        if let Err(error) = result {
-            let _ = sender.send(EngineEvent::Error(error));
+        if let Err(error) = result
+            && sender.send(EngineEvent::Error(error)).is_err()
+        {
+            return;
         }
         // Lifecycle completion is the final reliable event. Consumers may
         // safely join the producer after observing it without blocking on a
@@ -6973,7 +7051,7 @@ struct CaptureRunConfig<'a> {
     use_server_damage_calibration: bool,
     resources: CaptureResources,
     sender: &'a EngineEventSink,
-    stop: &'a AtomicBool,
+    stop: Arc<AtomicBool>,
     raw_capture: &'a RawCaptureBuffer,
     packet_emission: PacketEmissionMode,
 }
@@ -6986,6 +7064,7 @@ struct ParserRunConfig {
     packet_emission: PacketEmissionMode,
     resources: CaptureResources,
     sender: EngineEventSink,
+    stop: Arc<AtomicBool>,
 }
 
 /// Parser thread body: drains decoded frames off the bounded queue and runs the stable decode
@@ -7000,6 +7079,7 @@ fn run_parser(frames: CaptureFrameReceiver, config: ParserRunConfig) {
         packet_emission,
         resources,
         sender,
+        stop,
     } = config;
     let CaptureResources {
         characters,
@@ -7007,29 +7087,55 @@ fn run_parser(frames: CaptureFrameReceiver, config: ParserRunConfig) {
     } = resources;
     let mut decoder =
         PacketDecoder::with_ability_catalog(ability_catalog, use_server_damage_calibration);
-    decoder.enable_exact_mode(&sender);
+    if decoder.enable_exact_mode(&sender).is_err() {
+        stop.store(true, Ordering::Relaxed);
+        return;
+    }
     decoder.packet_emission = packet_emission;
-    if let Some(warning) = decoder.resource_warning() {
-        let _ = sender.send(EngineEvent::Warning(warning));
+    if let Some(warning) = decoder.resource_warning()
+        && sender.send(EngineEvent::Warning(warning)).is_err()
+    {
+        stop.store(true, Ordering::Relaxed);
+        return;
     }
     while let Ok(frame) = frames.recv() {
-        decoder.process_capture_frame(
-            CapturedPacket {
-                link_type,
-                data: &frame.data,
-                timestamp: FrameTimestamp::Known(frame.timestamp),
-            },
-            local_ip,
-            include_incoming,
-            &characters,
-            &sender,
-        );
+        if decoder
+            .process_capture_frame(
+                CapturedPacket {
+                    link_type,
+                    data: &frame.data,
+                    timestamp: FrameTimestamp::Known(frame.timestamp),
+                },
+                local_ip,
+                include_incoming,
+                &characters,
+                &sender,
+            )
+            .is_err()
+        {
+            stop.store(true, Ordering::Relaxed);
+            return;
+        }
     }
-    decoder.flush_inventory(&sender);
+    if decoder.flush_inventory(&sender).is_err() {
+        stop.store(true, Ordering::Relaxed);
+        return;
+    }
     let pending_hits = decoder.take_all_ambiguous_hits();
-    decoder.emit_hits(pending_hits, &characters, &sender);
+    if decoder
+        .emit_hits(pending_hits, &characters, &sender)
+        .is_err()
+    {
+        stop.store(true, Ordering::Relaxed);
+        return;
+    }
     let pending_targetless_hits = decoder.take_all_targetless_hits();
-    decoder.emit_hits(pending_targetless_hits, &characters, &sender);
+    if decoder
+        .emit_hits(pending_targetless_hits, &characters, &sender)
+        .is_err()
+    {
+        stop.store(true, Ordering::Relaxed);
+    }
 }
 
 fn forward_capture_frame(sender: &CaptureFrameSender, frame: CaptureFrame) -> Result<(), String> {
@@ -7137,20 +7243,23 @@ fn run_capture(config: CaptureRunConfig<'_>) -> Result<(), String> {
         || "; raw capture unavailable".to_owned(),
         |path| format!("; writing raw capture to {}", path.display()),
     );
-    let _ = sender.send(EngineEvent::Status(format!(
-        "capturing: {} ({}, {}){}",
-        device.description,
-        local_ip
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "local IP not filtered".to_owned()),
-        link_type.label(),
-        raw_capture_status
-    )));
+    if sender
+        .send(EngineEvent::Status(format!(
+            "capturing: {} ({}, {}){}",
+            device.description,
+            local_ip
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "local IP not filtered".to_owned()),
+            link_type.label(),
+            raw_capture_status
+        )))
+        .is_err()
+    {
+        return Ok(());
+    }
 
-    // Decode on a dedicated thread. Acquisition writes every raw frame before forwarding it to
-    // the FIFO parser queue. Both the frame count and payload-byte high-water are reliable
-    // backpressure bounds: full blocks the acquisition producer, no frame is dropped, and a
-    // disconnected parser fails the capture session.
+    // Decode on a dedicated thread. Acquisition enqueues every raw frame for
+    // off-thread pcapng writing before forwarding it to the FIFO parser queue.
     let (frame_sender, frame_receiver) = capture_frame_queue(
         CAPTURE_FRAME_QUEUE_CAPACITY,
         CAPTURE_FRAME_QUEUE_BYTE_HIGH_WATER,
@@ -7158,6 +7267,7 @@ fn run_capture(config: CaptureRunConfig<'_>) -> Result<(), String> {
     let parser_thread = {
         let resources = resources.clone();
         let sender = sender.clone();
+        let stop = Arc::clone(&stop);
         thread::spawn(move || {
             run_parser(
                 frame_receiver,
@@ -7169,6 +7279,7 @@ fn run_capture(config: CaptureRunConfig<'_>) -> Result<(), String> {
                     packet_emission,
                     resources,
                     sender,
+                    stop,
                 },
             );
         })
@@ -7221,7 +7332,9 @@ fn run_capture(config: CaptureRunConfig<'_>) -> Result<(), String> {
         if let Err(error) =
             forward_capture_frame(&frame_sender, CaptureFrame::new(packet.to_vec(), timestamp))
         {
-            loop_result = Err(error);
+            if !stop.load(Ordering::Relaxed) {
+                loop_result = Err(error);
+            }
             break;
         }
     }
@@ -7262,9 +7375,14 @@ pub fn import_pcapng(
             || "heuristic direction".to_owned(),
             |ip| format!("local IP {ip}"),
         );
-        let _ = sender.send(EngineEvent::Status(format!(
-            "importing pcapng: {direction_mode}"
-        )));
+        if sender
+            .send(EngineEvent::Status(format!(
+                "importing pcapng: {direction_mode}"
+            )))
+            .is_err()
+        {
+            return;
+        }
         let result = (|| -> Result<(usize, usize), PcapngImportError> {
             let file = File::open(&path).map_err(PcapngImportError::Io)?;
             let byte_budget_exceeded = Arc::new(AtomicBool::new(false));
@@ -7277,7 +7395,9 @@ pub fn import_pcapng(
                 .map_err(|error| map_pcapng_reader_error(error, &byte_budget_exceeded))?;
             let mut decoder =
                 PacketDecoder::with_ability_catalog(ability_catalog, use_server_damage_calibration);
-    decoder.enable_exact_mode(&sender);
+            decoder
+                .enable_exact_mode(&sender)
+                .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             // PCAP replay is an explicit diagnostics/import operation and
             // retains the legacy full packet projection for export fidelity.
             decoder.packet_emission = PacketEmissionMode::FullDebug;
@@ -7289,13 +7409,17 @@ pub fn import_pcapng(
                 load_enemy_catalog,
             );
             if let Some(warning) = decoder.resource_warning() {
-                let _ = sender.send(EngineEvent::Warning(warning));
+                sender
+                    .send(EngineEvent::Warning(warning))
+                    .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             }
             if !resource_warnings.is_empty() {
-                let _ = sender.send(EngineEvent::Warning(format!(
-                    "enemy telemetry catalog: {}",
-                    resource_warnings.join("; ")
-                )));
+                sender
+                    .send(EngineEvent::Warning(format!(
+                        "enemy telemetry catalog: {}",
+                        resource_warnings.join("; ")
+                    )))
+                    .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             }
             let mut packet_count = 0;
             let mut supported_count = 0;
@@ -7386,23 +7510,31 @@ pub fn import_pcapng(
                 supported_count += 1;
                 let frame_local_ip_hint =
                     replay_frame_local_ip_hint(link_type, &data, local_ip_hint);
-                decoder.process_capture_frame(
-                    CapturedPacket {
-                        link_type,
-                        data: &data,
-                        timestamp,
-                    },
-                    frame_local_ip_hint,
-                    include_incoming,
-                    &characters,
-                    &sender,
-                );
+                decoder
+                    .process_capture_frame(
+                        CapturedPacket {
+                            link_type,
+                            data: &data,
+                            timestamp,
+                        },
+                        frame_local_ip_hint,
+                        include_incoming,
+                        &characters,
+                        &sender,
+                    )
+                    .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             }
-            decoder.flush_inventory(&sender);
+            decoder
+                .flush_inventory(&sender)
+                .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             let pending_hits = decoder.take_all_ambiguous_hits();
-            decoder.emit_hits(pending_hits, &characters, &sender);
+            decoder
+                .emit_hits(pending_hits, &characters, &sender)
+                .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             let pending_targetless_hits = decoder.take_all_targetless_hits();
-            decoder.emit_hits(pending_targetless_hits, &characters, &sender);
+            decoder
+                .emit_hits(pending_targetless_hits, &characters, &sender)
+                .map_err(|_| PcapngImportError::ReceiverDisconnected)?;
             if packet_count > 0 && supported_count == 0 {
                 return Err(PcapngImportError::InvalidFormat(
                     "pcapng contains no supported Ethernet or raw IPv4 packets".to_owned(),
@@ -7413,15 +7545,25 @@ pub fn import_pcapng(
 
         match result {
             Ok((packet_count, supported_count)) => {
-                let _ = sender.send(EngineEvent::Status(format!(
-                    "pcapng import complete: read {packet_count} packets, parsed {supported_count} supported packets; {direction_mode}"
-                )));
+                if sender
+                    .send(EngineEvent::Status(format!(
+                        "pcapng import complete: read {packet_count} packets, parsed {supported_count} supported packets; {direction_mode}"
+                    )))
+                    .is_ok()
+                {
+                    let _ = sender.send(EngineEvent::CaptureStopped);
+                }
             }
+            Err(PcapngImportError::ReceiverDisconnected) => {}
             Err(error) => {
-                let _ = sender.send(EngineEvent::Error(format!("pcapng import failed: {error}")));
+                if sender
+                    .send(EngineEvent::Error(format!("pcapng import failed: {error}")))
+                    .is_ok()
+                {
+                    let _ = sender.send(EngineEvent::CaptureStopped);
+                }
             }
         }
-        let _ = sender.send(EngineEvent::CaptureStopped);
     })
 }
 
@@ -8993,26 +9135,32 @@ pub fn import_prepared_capture_json(
 
             match result {
                 Ok((hit_count, packet_count)) => {
-                    let _ = sender.send(EngineEvent::Status(format!(
-                        "JSON import complete: {packet_count} packets, {hit_count} hits"
-                    )));
+                    if sender
+                        .send(EngineEvent::Status(format!(
+                            "JSON import complete: {packet_count} packets, {hit_count} hits"
+                        )))
+                        .is_ok()
+                    {
+                        let _ = sender.send(EngineEvent::CaptureStopped);
+                    }
                 }
                 Err(error) => {
-                    let _ = sender.send(EngineEvent::Error(format!("JSON import failed: {error}")));
+                    if sender
+                        .send(EngineEvent::Error(format!("JSON import failed: {error}")))
+                        .is_ok()
+                    {
+                        let _ = sender.send(EngineEvent::CaptureStopped);
+                    }
                 }
             }
-            let _ = sender.send(EngineEvent::CaptureStopped);
         })
 }
 
 impl EngineEventDeliveryGate {
     fn wait_until_ready(&self) -> Result<(), EngineEventSendError> {
-        let (mut state, mut recovered) = lock_or_repair(&self.state, cancel_delivery);
+        let mut state = self.state.lock().expect("delivery gate lock");
         while *state == EngineEventDeliveryState::Pending {
-            (state, recovered) = wait_or_repair(&self.ready, &self.state, state, cancel_delivery);
-        }
-        if recovered {
-            self.ready.notify_all();
+            state = self.ready.wait(state).expect("delivery gate wait");
         }
         match *state {
             EngineEventDeliveryState::Released => Ok(()),
@@ -9036,17 +9184,9 @@ impl EngineEventDeliveryPermit {
         let Some(gate) = self.gate.take() else {
             return;
         };
-        let (mut state, recovered) = lock_or_repair(&gate.state, cancel_delivery);
-        if !recovered {
-            *state = next;
-        }
-        drop(state);
+        *gate.state.lock().expect("delivery gate lock") = next;
         gate.ready.notify_all();
     }
-}
-
-fn cancel_delivery(state: &mut EngineEventDeliveryState) {
-    *state = EngineEventDeliveryState::Cancelled;
 }
 
 impl Drop for EngineEventDeliveryPermit {

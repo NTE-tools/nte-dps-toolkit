@@ -16,8 +16,8 @@ import {
 } from "./equipment-canvas-layout";
 
 describe("equipment canvas layout", () => {
-  it("keeps primary click for focus and opens management on right-click", () => {
-    expect(equipmentCanvasPointerIntent(0)).toBe("focus");
+  it("opens details on primary click and right-click", () => {
+    expect(equipmentCanvasPointerIntent(0)).toBe("open");
     expect(equipmentCanvasPointerIntent(2)).toBe("open");
     expect(equipmentCanvasPointerIntent(1)).toBeNull();
   });

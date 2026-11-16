@@ -1,9 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CONSOLE_PAGE_IDS,
-  CONSOLE_FAVORITES_STORAGE_KEY,
-  CONSOLE_SIDEBAR_STORAGE_KEY,
   DEFAULT_CONSOLE_PAGE,
   adjacentConsolePage,
   consolePageActivityMode,
@@ -15,21 +13,30 @@ import {
   writeConsoleFavoritePages,
 } from "./console-navigation";
 
+function stubLocalStorage() {
+  const values = new Map<string, string>();
+  vi.stubGlobal("window", {
+    localStorage: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    },
+  });
+  return values;
+}
+
 describe("Console navigation", () => {
-  it("enables only migrated Console pages", () => {
-    expect(isConsolePageId("settings")).toBe(true);
-    expect(isConsolePageId("shortcuts")).toBe(true);
-    expect(isConsolePageId("mod-studio")).toBe(true);
-    expect(isConsolePageId("history")).toBe(true);
-    expect(isConsolePageId("timeline")).toBe(true);
-    expect(isConsolePageId("skills")).toBe(true);
-    expect(isConsolePageId("empty-curtain")).toBe(true);
-    expect(isConsolePageId("character-data")).toBe(true);
-    expect(isConsolePageId("encrypted-ini")).toBe(true);
-    expect(isConsolePageId("packets")).toBe(true);
-    expect(isConsolePageId("resources")).toBe(false);
-    expect(isConsolePageId("diagnostics")).toBe(true);
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("validates Console page identifiers", () => {
+    for (const page of CONSOLE_PAGE_IDS) {
+      expect(isConsolePageId(page)).toBe(true);
+    }
     expect(isConsolePageId("toString")).toBe(false);
+    expect(isConsolePageId("unknown-page")).toBe(false);
   });
 
   it("keeps exactly the active page visible", () => {
@@ -49,48 +56,40 @@ describe("Console navigation", () => {
 
   it("opens Settings and cycles through the sidebar order", () => {
     expect(DEFAULT_CONSOLE_PAGE).toBe("settings");
-    expect(adjacentConsolePage("settings", -1)).toBe("diagnostics");
-    expect(adjacentConsolePage("settings", 1)).toBe("shortcuts");
-    expect(adjacentConsolePage("shortcuts", 1)).toBe("history");
+    expect(adjacentConsolePage("history", -1)).toBe("diagnostics");
+    expect(adjacentConsolePage("skills", 1)).toBe("character-data");
+    expect(adjacentConsolePage("character-data", 1)).toBe("empty-curtain");
     expect(adjacentConsolePage("empty-curtain", 1)).toBe("mod-studio");
-    expect(adjacentConsolePage("mod-studio", 1)).toBe("character-data");
+    expect(adjacentConsolePage("mod-studio", 1)).toBe("settings");
+    expect(adjacentConsolePage("settings", 1)).toBe("shortcuts");
   });
 
   it("persists a validated and user-editable favorites list", () => {
-    const values = new Map<string, string>();
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-    };
+    const values = stubLocalStorage();
 
-    expect(readConsoleFavoritePages(storage)).toEqual(["settings", "history"]);
-    writeConsoleFavoritePages(["shortcuts"], storage);
-    expect(values.get(CONSOLE_FAVORITES_STORAGE_KEY)).toBe('["shortcuts"]');
-    expect(readConsoleFavoritePages(storage)).toEqual(["shortcuts"]);
+    expect(readConsoleFavoritePages()).toEqual(["settings", "history"]);
+    writeConsoleFavoritePages(["shortcuts"]);
+    expect(readConsoleFavoritePages()).toEqual(["shortcuts"]);
 
+    const key = [...values.keys()][0]!;
     values.set(
-      CONSOLE_FAVORITES_STORAGE_KEY,
+      key,
       JSON.stringify(["history", "missing", "history", "packets"]),
     );
-    expect(readConsoleFavoritePages(storage)).toEqual(["history", "packets"]);
-    values.set(CONSOLE_FAVORITES_STORAGE_KEY, "not-json");
-    expect(readConsoleFavoritePages(storage)).toEqual(["settings", "history"]);
+    expect(readConsoleFavoritePages()).toEqual(["history", "packets"]);
+    values.set(key, "not-json");
+    expect(readConsoleFavoritePages()).toEqual(["settings", "history"]);
   });
 
-  it("persists the explicit sidebar preference without requiring WebView storage", () => {
-    const values = new Map<string, string>();
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-    };
+  it("persists the explicit sidebar preference and falls back when storage is absent", () => {
+    expect(readConsoleSidebarCollapsed()).toBe(false);
+    stubLocalStorage();
 
-    expect(readConsoleSidebarCollapsed(storage)).toBe(false);
-    writeConsoleSidebarCollapsed(true, storage);
-    expect(values.get(CONSOLE_SIDEBAR_STORAGE_KEY)).toBe("true");
-    expect(readConsoleSidebarCollapsed(storage)).toBe(true);
-    writeConsoleSidebarCollapsed(false, storage);
-    expect(readConsoleSidebarCollapsed(storage)).toBe(false);
-    expect(readConsoleSidebarCollapsed(null)).toBe(false);
+    expect(readConsoleSidebarCollapsed()).toBe(false);
+    writeConsoleSidebarCollapsed(true);
+    expect(readConsoleSidebarCollapsed()).toBe(true);
+    writeConsoleSidebarCollapsed(false);
+    expect(readConsoleSidebarCollapsed()).toBe(false);
   });
 
   it("maps the legacy Console keyboard shortcuts and protects form controls", () => {

@@ -28,6 +28,9 @@ import {
   type EquipmentCanvasRenderWindow,
 } from "./equipment-canvas-layout";
 
+const CANVAS_SANS_FONT =
+  '"Geist Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif';
+
 interface EquipmentCanvasGridProps {
   items: EmptyCurtainItemSnapshot[];
   imageUrl: (item: EmptyCurtainItemSnapshot) => string | null;
@@ -207,7 +210,7 @@ export function EquipmentCanvasGrid({
     });
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["class", "style"],
+      attributeFilter: ["class", "style", "data-theme-preset", "data-accent"],
     });
     scroller.addEventListener("scroll", scheduleScroll, { passive: true });
     window.addEventListener("resize", scheduleResize, { passive: true });
@@ -309,7 +312,7 @@ export function EquipmentCanvasGrid({
         updateHoverOverlay(null);
       }}
       onClick={(event) => {
-        if (equipmentCanvasPointerIntent(event.button) !== "focus") return;
+        if (equipmentCanvasPointerIntent(event.button) !== "open") return;
         const index = indexFromPointer(
           event.target,
           event.nativeEvent.offsetX,
@@ -322,6 +325,7 @@ export function EquipmentCanvasGrid({
           tf("Equipment inventory, selected {}", [items[index].name]),
         );
         moveFocus(index);
+        onOpenItem(items[index]);
       }}
       onContextMenu={(event) => {
         if (equipmentCanvasPointerIntent(event.button) !== "open") return;
@@ -415,12 +419,8 @@ function drawEquipmentCard(
   context.save();
   roundedRect(context, x, y, width, height, 12);
   context.clip();
-  context.fillStyle =
-    EQUIPMENT_QUALITY_COLORS[item.quality as KnownEquipmentQuality] ??
-    theme.mutedForeground;
-  context.fillRect(x, y, 4, height);
   context.fillStyle = theme.muted;
-  context.fillRect(x + 4, y, width - 4, 68);
+  context.fillRect(x, y, width, 68);
   context.restore();
 
   const iconX = x + 16;
@@ -434,6 +434,12 @@ function drawEquipmentCard(
     theme,
     requestDraw,
   );
+  roundedRect(context, iconX - 0.75, iconY - 0.75, 49.5, 49.5, 10);
+  context.lineWidth = 1.5;
+  context.strokeStyle =
+    EQUIPMENT_QUALITY_COLORS[item.quality as KnownEquipmentQuality] ??
+    theme.border;
+  context.stroke();
 
   const header = equipmentCanvasHeaderMetrics(
     width,
@@ -454,7 +460,7 @@ function drawEquipmentCard(
 
   context.textBaseline = "middle";
   context.fillStyle = theme.foreground;
-  context.font = "600 14px Geist Variable, sans-serif";
+  context.font = `600 14px ${CANVAS_SANS_FONT}`;
   drawClippedText(context, item.name, x + 74, y + 22, header.titleWidth);
   context.font = "12px ui-monospace, monospace";
   context.fillStyle = theme.mutedForeground;
@@ -465,7 +471,7 @@ function drawEquipmentCard(
   if (item.locked) drawLock(context, x + width - 24, y + 21, theme.foreground);
   if (item.discarded) {
     context.fillStyle = theme.destructive;
-    context.font = "700 12px sans-serif";
+    context.font = `700 12px ${CANVAS_SANS_FONT}`;
     context.fillText("×", x + width - 26, y + 47);
   }
 
@@ -491,8 +497,8 @@ function drawEquipmentCard(
   }
   if (visibleStatCounts.secondary > 0) {
     context.fillStyle = theme.mutedForeground;
-    context.font = "600 12px Geist Variable, sans-serif";
-    context.fillText(t("Secondary Stats").toUpperCase(), x + 16, cursorY + 4);
+    context.font = `600 12px ${CANVAS_SANS_FONT}`;
+    context.fillText(t("Secondary Stats"), x + 16, cursorY + 4);
     cursorY += 19;
   }
   for (const stat of secondaryStats.slice(0, visibleStatCounts.secondary)) {
@@ -540,7 +546,7 @@ function drawStatLine(
   unlockLabel: string | null = null,
 ) {
   context.fillStyle = locked ? theme.mutedForeground : theme.foreground;
-  context.font = `${strong ? "600" : "500"} 12px Geist Variable, sans-serif`;
+  context.font = `${strong ? "600" : "500"} 12px ${CANVAS_SANS_FONT}`;
   const rightReserve = locked ? 88 : 62;
   drawClippedText(context, label, x, y, width - rightReserve);
   context.textAlign = "right";
@@ -575,7 +581,7 @@ function drawEquipmentImage(
   context.fill();
   if (!url) {
     context.fillStyle = theme.mutedForeground;
-    context.font = "20px sans-serif";
+    context.font = `20px ${CANVAS_SANS_FONT}`;
     context.fillText("◇", x + 15, y + size / 2);
     return;
   }

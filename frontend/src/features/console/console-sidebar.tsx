@@ -83,18 +83,15 @@ const CONSOLE_NAV_GROUPS: Array<{
 }> = [
   {
     labelKey: "Review",
-    pages: ["history", "timeline", "skills", "empty-curtain", "mod-studio"],
+    pages: ["history", "timeline", "skills"],
+  },
+  {
+    labelKey: "Characters",
+    pages: ["character-data", "empty-curtain", "mod-studio"],
   },
   {
     labelKey: "Advanced",
-    pages: [
-      "settings",
-      "shortcuts",
-      "character-data",
-      "encrypted-ini",
-      "packets",
-      "diagnostics",
-    ],
+    pages: ["settings", "shortcuts", "encrypted-ini", "packets", "diagnostics"],
   },
 ];
 
@@ -189,20 +186,23 @@ export function ConsoleSidebar({
             ))}
           </div>
         </div>
-        {CONSOLE_NAV_GROUPS.map((group) => (
-          <div className="mb-5" key={group.labelKey}>
-            <p
-              className={cn(
-                "mb-2 px-2 text-xs font-medium text-muted-foreground",
-                presentation.collapsed && "sr-only",
-              )}
-            >
-              {t(group.labelKey)}
-            </p>
-            <div className="flex flex-col gap-0.5">
-              {group.pages
-                .filter((page) => !favoritePages.includes(page))
-                .map((page) => (
+        {CONSOLE_NAV_GROUPS.map((group) => {
+          const visiblePages = group.pages.filter(
+            (page) => !favoritePages.includes(page),
+          );
+          if (visiblePages.length === 0) return null;
+          return (
+            <div className="mb-5" key={group.labelKey}>
+              <p
+                className={cn(
+                  "mb-2 px-2 text-xs font-medium text-muted-foreground",
+                  presentation.collapsed && "sr-only",
+                )}
+              >
+                {t(group.labelKey)}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                {visiblePages.map((page) => (
                   <ConsoleNavRow
                     active={page === activePage}
                     favorite={false}
@@ -213,9 +213,10 @@ export function ConsoleSidebar({
                     onNavigate={onNavigate}
                   />
                 ))}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </nav>
     </aside>
   );

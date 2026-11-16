@@ -1,7 +1,115 @@
+use std::{
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
 use tauri::{PhysicalPosition, Position, WebviewWindow, window::Monitor};
 
 const MIN_REACHABLE_WIDTH: i64 = 64;
 const TITLE_STRIP_HEIGHT: i64 = 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DebouncedEvent<T> {
+    Changed(T),
+    Shutdown,
+}
+
+struct DebouncedWorker {
+    shutdown: Box<dyn FnOnce() + Send>,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Default)]
+pub(crate) struct WindowPersistenceRuntime {
+    workers: Mutex<Vec<DebouncedWorker>>,
+}
+
+impl WindowPersistenceRuntime {
+    pub(crate) fn spawn_debounced<T, F>(
+        &self,
+        thread_name: &'static str,
+        save_delay: Duration,
+        persist: F,
+    ) -> Result<Sender<DebouncedEvent<T>>, String>
+    where
+        T: Copy + Send + 'static,
+        F: FnMut(T) + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name(thread_name.to_owned())
+            .spawn(move || run_debounced_persistence(receiver, save_delay, persist))
+            .map_err(|error| error.to_string())?;
+        let shutdown_sender = sender.clone();
+        let worker = DebouncedWorker {
+            shutdown: Box::new(move || {
+                let _ = shutdown_sender.send(DebouncedEvent::Shutdown);
+            }),
+            handle,
+        };
+        self.workers
+            .lock()
+            .map_err(|_| "window persistence runtime unavailable".to_owned())?
+            .push(worker);
+        Ok(sender)
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let workers = {
+            let Ok(mut guard) = self.workers.lock() else {
+                return;
+            };
+            std::mem::take(&mut *guard)
+        };
+        let handles = workers
+            .into_iter()
+            .map(|worker| {
+                (worker.shutdown)();
+                worker.handle
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for WindowPersistenceRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+pub(crate) fn run_debounced_persistence<T: Copy>(
+    receiver: Receiver<DebouncedEvent<T>>,
+    save_delay: Duration,
+    mut persist: impl FnMut(T),
+) {
+    loop {
+        let mut pending = match receiver.recv() {
+            Ok(DebouncedEvent::Changed(value)) => value,
+            Ok(DebouncedEvent::Shutdown) | Err(_) => return,
+        };
+
+        loop {
+            match receiver.recv_timeout(save_delay) {
+                Ok(DebouncedEvent::Changed(value)) => pending = value,
+                Ok(DebouncedEvent::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                    persist(pending);
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    persist(pending);
+                    break;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PhysicalBounds {
@@ -155,5 +263,72 @@ mod tests {
             restored_window_position([1857, 20], [760, 480], &[primary], primary),
             [580, 280]
         );
+    }
+
+    #[test]
+    fn debounced_persistence_coalesces_to_the_latest_value() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(DebouncedEvent::Changed(420_u16))
+            .expect("queue first value");
+        sender
+            .send(DebouncedEvent::Changed(512_u16))
+            .expect("queue latest value");
+        sender
+            .send(DebouncedEvent::Shutdown)
+            .expect("queue shutdown");
+
+        let mut persisted = Vec::new();
+        run_debounced_persistence(receiver, Duration::from_secs(1), |value| {
+            persisted.push(value);
+        });
+
+        assert_eq!(persisted, vec![512]);
+    }
+
+    #[test]
+    fn debounced_persistence_flushes_after_the_quiet_period() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(DebouncedEvent::Changed(420_u16))
+            .expect("queue value");
+        let shutdown_sender = sender.clone();
+
+        let mut persisted = Vec::new();
+        run_debounced_persistence(receiver, Duration::ZERO, |value| {
+            persisted.push(value);
+            shutdown_sender
+                .send(DebouncedEvent::Shutdown)
+                .expect("queue shutdown after persistence");
+        });
+
+        assert_eq!(persisted, vec![420]);
+    }
+
+    #[test]
+    fn persistence_runtime_shutdown_flushes_and_joins_owned_workers() {
+        let runtime = WindowPersistenceRuntime::default();
+        let persisted = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let worker_persisted = std::sync::Arc::clone(&persisted);
+        let sender = runtime
+            .spawn_debounced(
+                "tauri-test-window-save",
+                Duration::from_secs(10),
+                move |value: u16| {
+                    worker_persisted
+                        .lock()
+                        .expect("test persisted lock")
+                        .push(value);
+                },
+            )
+            .expect("spawn debounced worker");
+        sender
+            .send(DebouncedEvent::Changed(360))
+            .expect("queue first");
+        sender
+            .send(DebouncedEvent::Changed(480))
+            .expect("queue latest");
+        runtime.shutdown();
+        assert_eq!(*persisted.lock().expect("test persisted lock"), vec![480]);
     }
 }

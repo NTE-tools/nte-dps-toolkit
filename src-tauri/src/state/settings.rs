@@ -1,11 +1,13 @@
 use crate::{
     contract::settings::UpdateSettingsSnapshot,
     settings_service::{ConfigUpdate, PassthroughTransactionGuard},
-    update_runtime::UpdateRuntimeSnapshot,
 };
-use nte_dps_tool::storage::{
-    capture_logs::{ClearOutcome, clear_capture_logs, scan_capture_logs},
-    config::GlobalHotkeys,
+use nte_dps_tool::{
+    core::update_runtime::UpdateRuntimeSnapshot,
+    storage::{
+        capture_logs::{ClearOutcome, clear_capture_logs, scan_capture_logs},
+        config::GlobalHotkeys,
+    },
 };
 
 use super::*;
@@ -16,9 +18,7 @@ impl AppState {
     }
 
     pub(crate) fn capture_device_catalog_status(&self) -> (usize, bool) {
-        let snapshot = self.0.settings.device_catalog_snapshot(|| {
-            self.publish_settings_effects(SettingsMutationEffects::SETTINGS_AND_MAIN);
-        });
+        let snapshot = self.0.settings.device_catalog_snapshot();
         (snapshot.devices.len(), snapshot.available)
     }
 
@@ -137,20 +137,19 @@ impl AppState {
     }
 
     pub(crate) fn settings_snapshot(&self) -> SettingsSnapshot {
+        const MAX_SNAPSHOT_CONSISTENCY_ATTEMPTS: usize = 8;
+        let mut attempts = 0;
         let (generation, config, devices, teams, updates) = loop {
+            attempts += 1;
             let before = self.settings_revision();
             let config = self.ui_config();
-            let devices = self.0.settings.device_catalog_snapshot(|| {
-                self.publish_settings_effects(SettingsMutationEffects::SETTINGS_AND_MAIN);
-            });
-            let teams = self.0.team_import.status(|| {
-                self.publish_settings_effects(SettingsMutationEffects::SETTINGS);
-            });
+            let devices = self.0.settings.device_catalog_snapshot();
+            let teams = self.0.team_import.status();
             // Use the same config generation for both the main Settings DTO and
             // its nested update projection.
             let updates = self.update_settings_snapshot_for_config(&config);
             let after = self.settings_revision();
-            if before == after {
+            if before == after || attempts >= MAX_SNAPSHOT_CONSISTENCY_ATTEMPTS {
                 break (after, config, devices, teams, updates);
             }
         };
@@ -447,15 +446,6 @@ impl AppState {
         Ok(prepared)
     }
 
-    pub(crate) fn finish_plugin_update_install(
-        &self,
-        version: String,
-    ) -> Result<(), UpdateActionError> {
-        self.0.update_runtime.finish_plugin_install(version)?;
-        self.bump_settings_revision();
-        Ok(())
-    }
-
     pub(crate) fn fail_update_install(&self) -> Result<(), UpdateActionError> {
         self.fail_update_operation("Update installation could not start.")
     }
@@ -483,16 +473,6 @@ impl AppState {
                 ) =>
             {
                 Some("Stop capture or replay before installing the update")
-            }
-            Some(UpdateComponent::ModsPlugin) => {
-                match nte_dps_tool::platform::network::game_process_is_running() {
-                    Ok(true) => Some("Close HTGame.exe before installing the Mod loader update"),
-                    Ok(false) => None,
-                    Err(error) => {
-                        log::error!("check game process before Mod loader update failed: {error}");
-                        Some("Game process state could not be checked.")
-                    }
-                }
             }
             _ => None,
         }

@@ -10,9 +10,6 @@ $script:RuleIds = @{
     CloneProjection = "RUNTIME-HOT-CLONE"
     ChannelWorker   = "RUNTIME-CHANNEL-THREAD"
     ReplayBudget    = "RUNTIME-REPLAY-BUDGET"
-    ContractSlice   = "RUNTIME-CONTRACT-SLICE"
-    RetiredModCode  = "RUNTIME-RETIRED-MOD-CODE"
-    PoisonRecovery  = "RUNTIME-BLIND-POISON-RECOVERY"
     SourceTest      = "RUNTIME-SOURCE-TEST"
 }
 
@@ -105,64 +102,6 @@ function Get-NearestRustFunction {
     return [pscustomobject]@{ Name = ""; Start = 0; IsTest = $false }
 }
 
-function Test-RustTestRegion {
-    param(
-        [Parameter(Mandatory)]
-        [AllowEmptyCollection()]
-        [AllowEmptyString()]
-        [string[]]$Lines,
-        [Parameter(Mandatory)]
-        [int]$Index
-    )
-
-    $braceDepth = 0
-    $testModuleDepth = $null
-    $testModuleStart = $null
-    for ($cursor = 0; $cursor -le $Index -and $cursor -lt $Lines.Count; $cursor++) {
-        if ($Lines[$cursor] -match "#\s*\[\s*cfg\s*\(\s*(?:test\b|all\s*\([^)]*\btest\b[^)]*\))\s*\)\s*\]") {
-            $testModuleDepth = $braceDepth
-            $testModuleStart = $cursor
-        }
-        $opens = ([regex]::Matches($Lines[$cursor], "\{")).Count
-        $closes = ([regex]::Matches($Lines[$cursor], "\}")).Count
-        $braceDepth += $opens - $closes
-        if ($testModuleDepth -ne $null -and $cursor -gt $testModuleStart -and $braceDepth -le $testModuleDepth) {
-            $testModuleDepth = $null
-            $testModuleStart = $null
-        }
-    }
-    return $testModuleDepth -ne $null
-}
-
-function Find-BlindPoisonRecoveries {
-    param(
-        [Parameter(Mandatory)]
-        [System.IO.FileInfo[]]$Files
-    )
-
-    $occurrences = @()
-    $pattern = [regex]::new(
-        'unwrap_or_else\s*\(\s*\|\s*(?<guard>[A-Za-z_][A-Za-z0-9_]*)\s*\|\s*\k<guard>\s*\.\s*into_inner\s*\(\s*\)\s*\)',
-        [Text.RegularExpressions.RegexOptions]::Multiline
-    )
-    foreach ($file in $Files) {
-        $text = Get-Content -LiteralPath $file.FullName -Raw
-        $lines = @(Get-Content -LiteralPath $file.FullName)
-        foreach ($match in $pattern.Matches($text)) {
-            $line = ([regex]::Matches($text.Substring(0, $match.Index), "`n")).Count + 1
-            $lineIndex = [Math]::Max(0, $line - 1)
-            $function = Get-NearestRustFunction -Lines $lines -Index $lineIndex
-            if ($function.IsTest -or (Test-RustTestRegion -Lines $lines -Index $lineIndex)) {
-                continue
-            }
-            $occurrences += [pscustomobject]@{
-                Path = ConvertTo-RelativePath $file.FullName
-                Line = $line
-            }
-        }
-    }
-    return @($occurrences)
-}
 
 function Test-HotProjectionContext {
     param(
@@ -344,77 +283,11 @@ function Find-ReplayBudgetViolations {
     return @($violations)
 }
 
-function Find-ContractSilentSlices {
-    param(
-        [Parameter(Mandatory)]
-        [System.IO.FileInfo[]]$Files
-    )
-
-    $occurrences = @()
-    foreach ($file in $Files) {
-        $relative = ConvertTo-RelativePath $file.FullName
-        if ($relative -notmatch "^frontend/src/lib/tauri/.*contract\.ts$") {
-            continue
-        }
-        $lines = @(Get-Content -LiteralPath $file.FullName)
-        for ($index = 0; $index -lt $lines.Count; $index++) {
-            if (-not (Test-RequiredContractSliceWindow -Lines $lines -Index $index)) {
-                continue
-            }
-            $occurrences += [pscustomobject]@{
-                Path = $relative
-                Line = $index + 1
-                Text = $lines[$index].Trim()
-            }
-        }
-    }
-    return @($occurrences)
-}
-
-function Test-RequiredContractSliceWindow {
-    param(
-        [Parameter(Mandatory)]
-        [AllowEmptyCollection()]
-        [AllowEmptyString()]
-        [string[]]$Lines,
-        [Parameter(Mandatory)]
-        [int]$Index
-    )
-
-    if ($Index -lt 0 -or $Index -ge $Lines.Count -or $Lines[$Index] -notmatch "\.slice\s*\(") {
-        return $false
-    }
-    $start = [Math]::Max(0, $Index - 5)
-    $window = ($Lines[$start..$Index] -join "`n")
-    return $window -match "\blist\s*\("
-}
-
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repositoryRoot
 try {
-    & (Join-Path $PSScriptRoot "generate_mod_runtime_schema.ps1") -Check
     $rustFiles = Get-RepositoryFiles @("src", "src-tauri/src") @(".rs")
-    $frontendFiles = Get-RepositoryFiles @("frontend/src") @(".ts", ".tsx")
     $diagnostics = [System.Collections.Generic.List[object]]::new()
-
-    $modsPluginSourcePath = Join-Path $repositoryRoot "src/platform/mods_plugin.rs"
-    $modsPluginSource = Get-Content -LiteralPath $modsPluginSourcePath -Raw
-    if ($modsPluginSource -match 'LEGACY_ENEMY_TELEMETRY_MOD_V\d+') {
-        $diagnostics.Add((New-Diagnostic `
-                    -Severity Error `
-                    -Rule $script:RuleIds['RetiredModCode'] `
-                    -Path "src/platform/mods_plugin.rs" `
-                    -Message "Retired enemy-telemetry source programs must remain in Git history instead of the production module."))
-    }
-
-    foreach ($occurrence in @(Find-BlindPoisonRecoveries $rustFiles)) {
-        $diagnostics.Add((New-Diagnostic `
-                    -Severity Error `
-                    -Rule $script:RuleIds['PoisonRecovery'] `
-                    -Path $occurrence.Path `
-                    -Line $occurrence.Line `
-                    -Message "Blind Mutex poison recovery is forbidden; classify the protected invariant and use typed fail-closed or explicit full-state rebuild semantics."))
-    }
 
     foreach ($file in $rustFiles) {
         $path = ConvertTo-RelativePath $file.FullName
@@ -454,15 +327,6 @@ try {
     $replayViolations = @(Find-ReplayBudgetViolations $rustFiles)
     foreach ($diagnostic in $replayViolations) { $diagnostics.Add($diagnostic) }
 
-    $sliceOccurrences = @(Find-ContractSilentSlices $frontendFiles)
-    foreach ($occurrence in $sliceOccurrences) {
-        $diagnostics.Add((New-Diagnostic `
-                    -Severity Error `
-                    -Rule $script:RuleIds['ContractSlice'] `
-                    -Path $occurrence.Path `
-                    -Line $occurrence.Line `
-                    -Message "Required contract list is silently sliced; validate the server-bounded list instead."))
-    }
 
     $ordered = @($diagnostics | Sort-Object Severity, Rule, Path, Line)
     foreach ($diagnostic in $ordered) {

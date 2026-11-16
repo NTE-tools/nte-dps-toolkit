@@ -1,43 +1,44 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  consoleWindowBackgroundColor,
-  syncConsoleWindowBackground,
-} from "./console-window-background";
+const webview = vi.hoisted(() => ({
+  label: "console",
+  setBackgroundColor: vi.fn(async () => undefined),
+}));
+
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({
+    label: webview.label,
+    setBackgroundColor: webview.setBackgroundColor,
+  }),
+}));
+
+import { syncConsoleWindowBackground } from "./console-window-background";
 
 describe("Console window background", () => {
-  it("matches the opaque light and dark presentation colors", () => {
-    expect(consoleWindowBackgroundColor(false)).toEqual([246, 247, 248, 255]);
-    expect(consoleWindowBackgroundColor(true)).toEqual([9, 9, 11, 255]);
+  beforeEach(() => {
+    webview.label = "console";
+    webview.setBackgroundColor.mockClear();
   });
 
-  it("updates both opaque desktop window layers", async () => {
-    const setBackgroundColor = vi.fn(async () => undefined);
-    await syncConsoleWindowBackground(false, {
-      windowLabel: "console",
-      setBackgroundColor,
-    });
-    expect(setBackgroundColor).toHaveBeenCalledWith([246, 247, 248, 255]);
+  it("updates opaque desktop windows and skips transparent overlays", async () => {
+    await syncConsoleWindowBackground(false);
+    expect(webview.setBackgroundColor).toHaveBeenCalledWith([
+      246, 247, 248, 255,
+    ]);
 
-    setBackgroundColor.mockClear();
-    await syncConsoleWindowBackground(true, {
-      windowLabel: "main-dps",
-      setBackgroundColor,
-    });
-    expect(setBackgroundColor).toHaveBeenCalledWith([9, 9, 11, 255]);
+    webview.setBackgroundColor.mockClear();
+    webview.label = "main-dps";
+    await syncConsoleWindowBackground(true);
+    expect(webview.setBackgroundColor).toHaveBeenCalledWith([9, 9, 11, 255]);
 
-    setBackgroundColor.mockClear();
-    await syncConsoleWindowBackground(true, {
-      windowLabel: "character-details",
-      setBackgroundColor,
-    });
-    expect(setBackgroundColor).toHaveBeenCalledWith([9, 9, 11, 255]);
+    webview.setBackgroundColor.mockClear();
+    webview.label = "character-details";
+    await syncConsoleWindowBackground(true);
+    expect(webview.setBackgroundColor).toHaveBeenCalledWith([9, 9, 11, 255]);
 
-    setBackgroundColor.mockClear();
-    await syncConsoleWindowBackground(false, {
-      windowLabel: "hud-spike",
-      setBackgroundColor,
-    });
-    expect(setBackgroundColor).not.toHaveBeenCalled();
+    webview.setBackgroundColor.mockClear();
+    webview.label = "hud-spike";
+    await syncConsoleWindowBackground(false);
+    expect(webview.setBackgroundColor).not.toHaveBeenCalled();
   });
 });

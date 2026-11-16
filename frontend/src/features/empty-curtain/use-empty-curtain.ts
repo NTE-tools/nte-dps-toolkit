@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useSnapshotStream } from "@/hooks/use-snapshot-stream";
 import {
   emptyCurtainClient,
   type ManageItemInput,
@@ -10,21 +11,10 @@ import type { EmptyCurtainSnapshot } from "@/lib/tauri/generated/EmptyCurtainSna
 import type { ItemUidSnapshot } from "@/lib/tauri/generated/ItemUidSnapshot";
 import { type CommandError, toCommandError } from "@/lib/tauri/command-error";
 
-export type EmptyCurtainPageState =
-  | { status: "loading" }
-  | { status: "error"; error: CommandError }
-  | { status: "ready"; snapshot: EmptyCurtainSnapshot };
-
 export function useEmptyCurtain() {
-  const [state, setState] = useState<EmptyCurtainPageState>({
-    status: "loading",
-  });
   const [notice, setNotice] = useState<CommandError | null>(null);
   const [actionPending, setActionPending] = useState(false);
-  const [refreshing, setRefreshing] = useState(true);
-  const [reloadKey, setReloadKey] = useState(0);
   const mounted = useRef(true);
-  const requestGeneration = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -33,58 +23,15 @@ export function useEmptyCurtain() {
     };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    const generation = ++requestGeneration.current;
-    setRefreshing(true);
-    setState((current) =>
-      current.status === "ready" ? current : { status: "loading" },
-    );
-    setNotice(null);
-    void emptyCurtainClient
-      .getSnapshot()
-      .then((snapshot) => {
-        if (
-          active &&
-          mounted.current &&
-          generation === requestGeneration.current
-        ) {
-          setState({ status: "ready", snapshot });
-        }
-      })
-      .catch((error: unknown) => {
-        if (
-          active &&
-          mounted.current &&
-          generation === requestGeneration.current
-        ) {
-          setState((current) =>
-            current.status === "ready"
-              ? current
-              : { status: "error", error: toCommandError(error) },
-          );
-          setNotice(toCommandError(error));
-        }
-      })
-      .finally(() => {
-        if (
-          active &&
-          mounted.current &&
-          generation === requestGeneration.current
-        )
-          setRefreshing(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [reloadKey]);
-
-  useEffect(() => {
-    let active = true;
-    const unsubscribe = emptyCurtainClient.subscribe(
-      (snapshot) => {
-        if (!active || !mounted.current) return;
-        setState({ status: "ready", snapshot });
+  const { state, refreshing, applySnapshot, retry } =
+    useSnapshotStream<EmptyCurtainSnapshot>({
+      keepReadyOnReload: true,
+      getSnapshot: () => emptyCurtainClient.getSnapshot(),
+      subscribe: (onSnapshot, onError) =>
+        emptyCurtainClient.subscribe(onSnapshot, onError),
+      reduceEvent: (_current, snapshot) => snapshot,
+      onSnapshotApplied: (snapshot, source) => {
+        if (source !== "stream") return;
         if (!snapshot.canOperate) {
           setNotice((current) =>
             current &&
@@ -122,15 +69,8 @@ export function useEmptyCurtain() {
           );
         }
       },
-      (error) => {
-        if (active && mounted.current) setNotice(error);
-      },
-    );
-    return () => {
-      active = false;
-      void unsubscribe();
-    };
-  }, []);
+      onStreamError: (error) => setNotice(error),
+    });
 
   const runSnapshotAction = useCallback(
     async (operation: Promise<EmptyCurtainSnapshot>) => {
@@ -138,14 +78,14 @@ export function useEmptyCurtain() {
       setNotice(null);
       try {
         const snapshot = await operation;
-        if (mounted.current) setState({ status: "ready", snapshot });
+        if (mounted.current) applySnapshot(snapshot);
       } catch (error) {
         if (mounted.current) setNotice(toCommandError(error));
       } finally {
         if (mounted.current) setActionPending(false);
       }
     },
-    [],
+    [applySnapshot],
   );
 
   const runFileAction = useCallback(
@@ -154,15 +94,14 @@ export function useEmptyCurtain() {
       setNotice(null);
       try {
         const result = await operation;
-        if (mounted.current)
-          setState({ status: "ready", snapshot: result.snapshot });
+        if (mounted.current) applySnapshot(result.snapshot);
       } catch (error) {
         if (mounted.current) setNotice(toCommandError(error));
       } finally {
         if (mounted.current) setActionPending(false);
       }
     },
-    [],
+    [applySnapshot],
   );
 
   const positions = useCallback(
@@ -190,8 +129,8 @@ export function useEmptyCurtain() {
     clearNotice: () => setNotice(null),
     retry: () => {
       if (state.status === "ready" && !canOperate) return;
-      setRefreshing(true);
-      setReloadKey((value) => value + 1);
+      setNotice(null);
+      retry();
     },
     positions,
     manageItem: (input: ManageItemInput) =>

@@ -24,7 +24,11 @@ import { CharacterSnapshotDetail } from "./character-build-sheet";
 import { panelImage } from "./character-build-model";
 export { CharacterSnapshotDetail } from "./character-build-sheet";
 
-export function CharacterDataPage() {
+export function CharacterDataPage({
+  onOpenModStudio,
+}: {
+  onOpenModStudio?: () => void;
+} = {}) {
   const model = useUserCharacters();
   const [search, setSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
@@ -61,9 +65,10 @@ export function CharacterDataPage() {
             variant="outline"
             disabled={model.pending}
             onClick={() => {
-              setAppliedSearch("");
-              setSearch("");
-              model.load(INITIAL_CHARACTER_REQUEST);
+              model.load({
+                ...INITIAL_CHARACTER_REQUEST,
+                query: appliedSearch,
+              });
             }}
           >
             {t("Check snapshot")}
@@ -71,10 +76,9 @@ export function CharacterDataPage() {
           <Button
             disabled={model.pending || !model.snapshot?.sdkCompatible}
             onClick={() => {
-              setAppliedSearch("");
-              setSearch("");
               model.load({
                 ...INITIAL_CHARACTER_REQUEST,
+                query: appliedSearch,
                 refresh: true,
                 expectedIdentity: model.snapshot?.connectionIdentity ?? null,
               });
@@ -172,7 +176,7 @@ export function CharacterDataPage() {
                       <img
                         src={panelImage("avatar", r.itemId)!}
                         alt=""
-                        className="size-9 shrink-0 rounded-full bg-muted object-cover"
+                        className="size-9 shrink-0 rounded-lg bg-muted object-cover"
                         draggable={false}
                       />
                     ) : (
@@ -220,7 +224,7 @@ export function CharacterDataPage() {
               </Button>
             </footer>
           </aside>
-          <main className="min-h-0 min-w-0 overflow-y-auto rounded-xl border bg-card p-3 max-[800px]:shrink-0 max-[800px]:overflow-visible">
+          <main className="@container min-h-0 min-w-0 overflow-y-auto rounded-xl border bg-card p-3 max-[800px]:shrink-0 max-[800px]:overflow-visible">
             {!page.complete ? (
               <Alert className="mb-4">
                 <AlertTitle>{t("Partial snapshot")}</AlertTitle>
@@ -241,10 +245,17 @@ export function CharacterDataPage() {
           </main>
         </div>
       ) : (
-        <div className="flex flex-1 items-center justify-center p-8 text-center text-sm text-muted-foreground">
-          {t(
-            "Load NTE_PluginUser in Mod Workshop, then refresh from the game. Resource files are not used as account data.",
-          )}
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center text-sm text-muted-foreground">
+          <p className="max-w-md">
+            {t(
+              "Load NTE_PluginUser in Mod Workshop, then refresh from the game. Resource files are not used as account data.",
+            )}
+          </p>
+          {onOpenModStudio ? (
+            <Button variant="outline" onClick={onOpenModStudio}>
+              {t("Open Mod Studio")}
+            </Button>
+          ) : null}
         </div>
       )}
     </section>

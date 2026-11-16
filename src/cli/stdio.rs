@@ -34,9 +34,10 @@ use crate::core::capture::{
     self, CaptureController, CaptureControllerOptions, CaptureDeviceSelector, CaptureProfile,
     RawCaptureMode,
 };
+use crate::core::equipment_rpc;
+use crate::core::equipment_runtime::{self, EquipmentOperation, EquipmentPlacement};
 use crate::core::reducer::{CoreSignal, apply_engine_event};
 use crate::core::snapshot::{InventorySnapshot, inventory_snapshot};
-use crate::core::sync::lock_or_repair;
 use crate::core::timeline::TimelineScope;
 use crate::core::{CoreError, CoreErrorCode};
 use crate::engine::capture::PacketEmissionMode;
@@ -49,10 +50,7 @@ use crate::engine::parser::{
     GAMEPLAY_EFFECT_SEMANTICS_PATH, SKILL_DAMAGE_DATA_PATH, load_characters,
     load_equipment_catalog,
 };
-use crate::platform::mods_plugin::{
-    ModsPluginClient, ModsPluginOperation, ModsPluginPlacement, ModsPluginRequest,
-    ModsPluginResponse, ModsPluginSubmitError,
-};
+use crate::platform::toolkit::{ToolkitClient, ToolkitError};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const COMMAND_QUEUE_CAPACITY: usize = 128;
@@ -100,12 +98,10 @@ struct LatestMessageReceiver {
     _wake_guard: Sender<()>,
 }
 
-/// The coalescing slot is ephemeral. A panic can leave an arbitrary partial
-/// JSON value in it, so reset to empty and clear poison before reuse.
 fn lock_latest_message_slot(
     slot: &Mutex<Option<Value>>,
 ) -> std::sync::MutexGuard<'_, Option<Value>> {
-    lock_or_repair(slot, |value| *value = None).0
+    slot.lock().expect("latest message slot lock")
 }
 
 fn latest_message_channel() -> (LatestMessageSender, LatestMessageReceiver) {
@@ -141,10 +137,149 @@ impl LatestMessageReceiver {
     }
 }
 
+struct EquipmentRequest {
+    request_id: u64,
+    character: HtItemNetId,
+    operation: EquipmentOperation,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EquipmentDispatchError {
+    Unavailable,
+    Busy,
+    Rejected(String),
+}
+
+impl EquipmentDispatchError {
+    fn from_toolkit(error: ToolkitError) -> Self {
+        match error {
+            ToolkitError::Busy => Self::Busy,
+            ToolkitError::Unavailable
+            | ToolkitError::OperationUnavailable
+            | ToolkitError::Stopping
+            | ToolkitError::Timeout
+            | ToolkitError::Unsupported
+            | ToolkitError::Cancelled => Self::Unavailable,
+            other => Self::Rejected(format!("Toolkit equipment request failed ({other})")),
+        }
+    }
+
+    fn from_runtime(error: equipment_runtime::Error) -> Self {
+        match error {
+            equipment_runtime::Error::Transport(error) => Self::from_toolkit(error),
+            equipment_runtime::Error::Snapshot(error) => {
+                Self::Rejected(format!("Inventory snapshot read failed ({error:?})"))
+            }
+            equipment_runtime::Error::Unconfirmed => {
+                Self::Rejected("Equipment change was not confirmed by readback".to_owned())
+            }
+            equipment_runtime::Error::ConfirmationPending(_) => {
+                Self::Rejected("Equipment readback confirmation is still pending".to_owned())
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EquipmentResponse {
+    request_id: u64,
+    outcome: Result<(), EquipmentDispatchError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EquipmentSubmitError {
+    Busy,
+    Disconnected,
+}
+
+struct EquipmentWorker {
+    request_tx: Option<Sender<EquipmentRequest>>,
+    response_rx: Receiver<EquipmentResponse>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl EquipmentWorker {
+    fn new(catalog: Arc<EquipmentCatalog>) -> Self {
+        let (request_tx, request_rx) = bounded::<EquipmentRequest>(1);
+        let (response_tx, response_rx) = unbounded::<EquipmentResponse>();
+        let worker = thread::Builder::new()
+            .name("nte-core-equipment".to_owned())
+            .spawn(move || {
+                while let Ok(request) = request_rx.recv() {
+                    let outcome = dispatch_equipment_request(&catalog, &request);
+                    if response_tx
+                        .send(EquipmentResponse {
+                            request_id: request.request_id,
+                            outcome,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            request_tx: worker.is_some().then_some(request_tx),
+            response_rx,
+            worker,
+        }
+    }
+
+    fn response_receiver(&self) -> Receiver<EquipmentResponse> {
+        self.response_rx.clone()
+    }
+
+    fn submit_request(&self, request: EquipmentRequest) -> Result<(), EquipmentSubmitError> {
+        let Some(request_tx) = self.request_tx.as_ref() else {
+            return Err(EquipmentSubmitError::Disconnected);
+        };
+        request_tx.try_send(request).map_err(|error| match error {
+            crossbeam_channel::TrySendError::Full(_) => EquipmentSubmitError::Busy,
+            crossbeam_channel::TrySendError::Disconnected(_) => EquipmentSubmitError::Disconnected,
+        })
+    }
+}
+
+impl Drop for EquipmentWorker {
+    fn drop(&mut self) {
+        drop(self.request_tx.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn dispatch_equipment_request(
+    catalog: &EquipmentCatalog,
+    request: &EquipmentRequest,
+) -> Result<(), EquipmentDispatchError> {
+    let Some(pid) = crate::platform::network::game_process_id()
+        .map_err(|_| EquipmentDispatchError::Unavailable)?
+    else {
+        return Err(EquipmentDispatchError::Unavailable);
+    };
+    let host = ToolkitClient::open(pid).map_err(EquipmentDispatchError::from_toolkit)?;
+    let router = equipment_rpc::Router::default();
+    let mut client = equipment_runtime::connect(&router, &host, pid)
+        .map_err(EquipmentDispatchError::from_runtime)?;
+    let before = equipment_runtime::collect(&mut client, catalog)
+        .map_err(EquipmentDispatchError::from_runtime)?;
+    equipment_runtime::execute(
+        &mut client,
+        &before,
+        request.character,
+        &request.operation,
+        catalog,
+    )
+    .map_err(EquipmentDispatchError::from_runtime)?;
+    Ok(())
+}
+
 struct RuntimeResources {
     characters: Arc<HashMap<u32, CharacterInfo>>,
     ability_catalog: Arc<AbilityCatalog>,
-    equipment_catalog: EquipmentCatalog,
+    equipment_catalog: Arc<EquipmentCatalog>,
 }
 
 impl RuntimeResources {
@@ -154,7 +289,7 @@ impl RuntimeResources {
         Ok(Self {
             characters: Arc::new(load_characters(Path::new(CHARACTER_DATA_PATH))?),
             ability_catalog: Arc::new(ability_catalog),
-            equipment_catalog: load_equipment_catalog(Path::new(EQUIPMENT_CATALOG_PATH))?,
+            equipment_catalog: Arc::new(load_equipment_catalog(Path::new(EQUIPMENT_CATALOG_PATH))?),
         })
     }
 }
@@ -165,7 +300,7 @@ struct Runtime {
     capture: CaptureController,
     characters: Arc<HashMap<u32, CharacterInfo>>,
     ability_catalog: Arc<AbilityCatalog>,
-    equipment_catalog: EquipmentCatalog,
+    equipment_catalog: Arc<EquipmentCatalog>,
     latest_inventory: Option<InventorySnapshot>,
     sequence: u64,
     inventory_generation: u64,
@@ -173,7 +308,7 @@ struct Runtime {
     battle_record_sequence: u64,
     battle_record: Option<BattleRecordRuntime>,
     equipment_request_sequence: u64,
-    mods_plugin: ModsPluginClient,
+    equipment_worker: EquipmentWorker,
     pending_equipment_requests: HashMap<u64, Value>,
     active_operation_id: Option<String>,
     latest_operation_id: Option<String>,
@@ -216,6 +351,7 @@ impl Runtime {
         latest_battle_summary: LatestMessageSender,
         data_dir: PathBuf,
     ) -> Self {
+        let equipment_worker = EquipmentWorker::new(Arc::clone(&resources.equipment_catalog));
         Self {
             handshaken: false,
             state: CombatState::default(),
@@ -230,7 +366,7 @@ impl Runtime {
             battle_record_sequence: 0,
             battle_record: None,
             equipment_request_sequence: 0,
-            mods_plugin: ModsPluginClient::new(),
+            equipment_worker,
             pending_equipment_requests: HashMap::new(),
             active_operation_id: None,
             latest_operation_id: None,
@@ -315,10 +451,10 @@ impl Runtime {
     fn submit_equipment_request(
         &mut self,
         id: Value,
-        request: ModsPluginRequest,
-    ) -> Result<(), ModsPluginSubmitError> {
+        request: EquipmentRequest,
+    ) -> Result<(), EquipmentSubmitError> {
         let request_id = request.request_id;
-        self.mods_plugin.submit_request(request)?;
+        self.equipment_worker.submit_request(request)?;
         assert!(
             self.pending_equipment_requests
                 .insert(request_id, id)
@@ -330,40 +466,37 @@ impl Runtime {
 
     fn process_equipment_response(
         &mut self,
-        response: ModsPluginResponse,
+        response: EquipmentResponse,
         outbound: &Sender<Value>,
     ) -> bool {
         let Some(id) = self.pending_equipment_requests.remove(&response.request_id) else {
             eprintln!(
-                "warning: ignoring Mod loader response for unknown or stale request_id {}",
+                "warning: ignoring equipment response for unknown or stale request_id {}",
                 response.request_id
             );
             return false;
         };
-        let message = match response.status {
-            Ok(0) => success(
+        let message = match response.outcome {
+            Ok(()) => success(
                 id,
                 EquipmentRequestResult {
                     status: "rpc_dispatched",
                 },
             ),
-            Ok(1) => success(
+            Err(EquipmentDispatchError::Busy) => failure(
                 id,
-                EquipmentRequestResult {
-                    status: "dry_run_ok",
-                },
+                RpcError::domain("MODS_PLUGIN_BUSY", "Toolkit equipment bridge is busy"),
             ),
-            Ok(status) => failure(
+            Err(EquipmentDispatchError::Unavailable) => failure(
                 id,
                 RpcError::domain(
-                    "EQUIPMENT_REQUEST_REJECTED",
-                    format!("Mod loader rejected the request with status {status}"),
+                    "MODS_PLUGIN_UNAVAILABLE",
+                    "Toolkit equipment bridge is unavailable",
                 ),
             ),
-            Err(_) => failure(
-                id,
-                RpcError::domain("MODS_PLUGIN_UNAVAILABLE", "Mod loader is unavailable"),
-            ),
+            Err(EquipmentDispatchError::Rejected(reason)) => {
+                failure(id, RpcError::domain("EQUIPMENT_REQUEST_REJECTED", reason))
+            }
         };
         send(outbound, message)
     }
@@ -371,20 +504,21 @@ impl Runtime {
     fn fail_pending_equipment_requests(&mut self, outbound: &Sender<Value>) -> bool {
         let pending = std::mem::take(&mut self.pending_equipment_requests);
         if pending.is_empty() {
-            eprintln!(
-                "warning: Mod loader worker disconnected; no equipment requests were pending"
-            );
+            eprintln!("warning: equipment worker disconnected; no equipment requests were pending");
             return false;
         }
         eprintln!(
-            "warning: Mod loader worker disconnected; failing {} pending equipment request(s)",
+            "warning: equipment worker disconnected; failing {} pending equipment request(s)",
             pending.len()
         );
         for (_, id) in pending {
             if outbound
                 .send(failure(
                     id,
-                    RpcError::domain("MODS_PLUGIN_UNAVAILABLE", "Mod loader is unavailable"),
+                    RpcError::domain(
+                        "MODS_PLUGIN_UNAVAILABLE",
+                        "Toolkit equipment bridge is unavailable",
+                    ),
                 ))
                 .is_err()
             {
@@ -941,7 +1075,7 @@ fn core_loop(
     mut runtime: Runtime,
 ) {
     let battle_summary_tick = tick(BATTLE_SUMMARY_INTERVAL);
-    let mut equipment_response_rx = runtime.mods_plugin.response_receiver();
+    let mut equipment_response_rx = runtime.equipment_worker.response_receiver();
     loop {
         select! {
             recv(writer_event_rx) -> _ => {
@@ -1111,24 +1245,27 @@ fn handle_request(
             send(outbound, message)
         }
         Request::Equipment(operation) => {
-            let request = mods_plugin_request(runtime.next_equipment_request_id(), operation);
+            let request = equipment_request(runtime.next_equipment_request_id(), operation);
             match runtime.submit_equipment_request(id.clone(), request) {
                 Ok(()) => false,
-                Err(ModsPluginSubmitError::Busy) => send(
+                Err(EquipmentSubmitError::Busy) => send(
                     outbound,
                     failure(
                         id,
                         RpcError::domain(
                             "MODS_PLUGIN_BUSY",
-                            "Mod loader already has the maximum number of pending requests",
+                            "Toolkit equipment bridge already has the maximum number of pending requests",
                         ),
                     ),
                 ),
-                Err(ModsPluginSubmitError::Disconnected) => send(
+                Err(EquipmentSubmitError::Disconnected) => send(
                     outbound,
                     failure(
                         id,
-                        RpcError::domain("MODS_PLUGIN_UNAVAILABLE", "Mod loader is unavailable"),
+                        RpcError::domain(
+                            "MODS_PLUGIN_UNAVAILABLE",
+                            "Toolkit equipment bridge is unavailable",
+                        ),
                     ),
                 ),
             }
@@ -1173,7 +1310,7 @@ fn handle_request(
     }
 }
 
-fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> ModsPluginRequest {
+fn equipment_request(request_id: u64, operation: EquipmentOperationParam) -> EquipmentRequest {
     let (character, operation) = match operation {
         EquipmentOperationParam::EquipModule {
             character,
@@ -1182,7 +1319,7 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             column,
         } => (
             item_net_id(character),
-            ModsPluginOperation::EquipModule {
+            EquipmentOperation::EquipModule {
                 equipment: item_net_id(equipment),
                 row,
                 column,
@@ -1193,7 +1330,7 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             equipment,
         } => (
             item_net_id(character),
-            ModsPluginOperation::EquipCore {
+            EquipmentOperation::EquipCore {
                 equipment: item_net_id(equipment),
             },
         ),
@@ -1202,7 +1339,7 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             equipment,
         } => (
             item_net_id(character),
-            ModsPluginOperation::UnequipModule {
+            EquipmentOperation::UnequipModule {
                 equipment: item_net_id(equipment),
             },
         ),
@@ -1211,12 +1348,12 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             equipment,
         } => (
             item_net_id(character),
-            ModsPluginOperation::UnequipCore {
+            EquipmentOperation::UnequipCore {
                 equipment: item_net_id(equipment),
             },
         ),
         EquipmentOperationParam::UnequipAll { character } => {
-            (item_net_id(character), ModsPluginOperation::UnequipAll)
+            (item_net_id(character), EquipmentOperation::UnequipAll)
         }
         EquipmentOperationParam::EquipOneKey {
             character,
@@ -1224,10 +1361,10 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             core,
         } => (
             item_net_id(character),
-            ModsPluginOperation::EquipOneKey {
+            EquipmentOperation::EquipOneKey {
                 placements: placements
                     .into_iter()
-                    .map(|placement| ModsPluginPlacement {
+                    .map(|placement| EquipmentPlacement {
                         equipment: item_net_id(placement.equipment),
                         row: placement.row,
                         column: placement.column,
@@ -1243,7 +1380,7 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             column,
         } => (
             item_net_id(character),
-            ModsPluginOperation::MoveModuleToCharacter {
+            EquipmentOperation::MoveModuleToCharacter {
                 equipment: item_net_id(equipment),
                 row,
                 column,
@@ -1254,7 +1391,7 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             equipment,
         } => (
             item_net_id(character),
-            ModsPluginOperation::MoveCoreToCharacter {
+            EquipmentOperation::MoveCoreToCharacter {
                 equipment: item_net_id(equipment),
             },
         ),
@@ -1263,20 +1400,20 @@ fn mods_plugin_request(request_id: u64, operation: EquipmentOperationParam) -> M
             discarded,
         } => (
             HtItemNetId::ZERO,
-            ModsPluginOperation::SetItemDiscarded {
+            EquipmentOperation::SetItemDiscarded {
                 equipment: item_net_id(equipment),
                 discarded,
             },
         ),
         EquipmentOperationParam::SetItemLocked { equipment, locked } => (
             HtItemNetId::ZERO,
-            ModsPluginOperation::SetItemLocked {
+            EquipmentOperation::SetItemLocked {
                 equipment: item_net_id(equipment),
                 locked,
             },
         ),
     };
-    ModsPluginRequest {
+    EquipmentRequest {
         request_id,
         character,
         operation,
@@ -1920,7 +2057,7 @@ mod tests {
 
     #[test]
     fn equipment_requests_map_external_uids_and_boolean_state() {
-        let request = mods_plugin_request(
+        let request = equipment_request(
             17,
             EquipmentOperationParam::MoveModuleToCharacter {
                 character: ItemUidParam { slot: 1, serial: 2 },
@@ -1933,14 +2070,14 @@ mod tests {
         assert_eq!(request.character, HtItemNetId { solt: 1, serial: 2 });
         assert!(matches!(
             request.operation,
-            ModsPluginOperation::MoveModuleToCharacter {
+            EquipmentOperation::MoveModuleToCharacter {
                 equipment: HtItemNetId { solt: 3, serial: 4 },
                 row: 2,
                 column: 5,
             }
         ));
 
-        let request = mods_plugin_request(
+        let request = equipment_request(
             18,
             EquipmentOperationParam::SetItemLocked {
                 equipment: ItemUidParam { slot: 5, serial: 6 },
@@ -1950,7 +2087,7 @@ mod tests {
         assert_eq!(request.character, HtItemNetId::ZERO);
         assert!(matches!(
             request.operation,
-            ModsPluginOperation::SetItemLocked {
+            EquipmentOperation::SetItemLocked {
                 equipment: HtItemNetId { solt: 5, serial: 6 },
                 locked: true,
             }
@@ -2234,9 +2371,9 @@ mod tests {
         let (outbound, receiver) = unbounded();
 
         assert!(!runtime.process_equipment_response(
-            ModsPluginResponse {
+            EquipmentResponse {
                 request_id: 99,
-                status: Ok(0),
+                outcome: Ok(()),
             },
             &outbound,
         ));
@@ -2247,17 +2384,17 @@ mod tests {
         assert!(receiver.try_recv().is_err());
 
         assert!(!runtime.process_equipment_response(
-            ModsPluginResponse {
+            EquipmentResponse {
                 request_id: 1,
-                status: Ok(0),
+                outcome: Ok(()),
             },
             &outbound,
         ));
         assert_eq!(receiver.recv().expect("normal response")["id"], "rpc-1");
         assert!(!runtime.process_equipment_response(
-            ModsPluginResponse {
+            EquipmentResponse {
                 request_id: 1,
-                status: Ok(0),
+                outcome: Ok(()),
             },
             &outbound,
         ));
@@ -2322,15 +2459,35 @@ mod tests {
         let (release_tx, release_rx) = bounded(1);
         let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker_call_count = Arc::clone(&call_count);
-        runtime.mods_plugin = ModsPluginClient::with_call_for_test(move |_| {
-            if worker_call_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
-                started_tx.send(()).unwrap();
-                release_rx
-                    .recv()
-                    .map_err(|_| "test pipe call release channel closed".to_owned())?;
+        let (test_req_tx, test_req_rx) = bounded::<EquipmentRequest>(1);
+        let (test_resp_tx, test_resp_rx) = unbounded::<EquipmentResponse>();
+        let test_worker = thread::spawn(move || {
+            while let Ok(request) = test_req_rx.recv() {
+                let outcome =
+                    if worker_call_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+                        started_tx.send(()).unwrap();
+                        release_rx
+                            .recv()
+                            .map_err(|_| EquipmentDispatchError::Unavailable)
+                    } else {
+                        Ok(())
+                    };
+                if test_resp_tx
+                    .send(EquipmentResponse {
+                        request_id: request.request_id,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
-            Ok(0)
         });
+        runtime.equipment_worker = EquipmentWorker {
+            request_tx: Some(test_req_tx),
+            response_rx: test_resp_rx,
+            worker: Some(test_worker),
+        };
 
         let (command_tx, command_rx) = bounded(4);
         let (outbound_tx, outbound_rx) = bounded(4);
@@ -2418,26 +2575,6 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(lines, vec![serde_json::json!({"generation": 2})]);
-    }
-
-    #[test]
-    fn poisoned_latest_message_slot_drops_partial_value_and_recovers_empty() {
-        let slot = Mutex::new(Some(serde_json::json!({"partial": true})));
-        let _ = std::panic::catch_unwind(|| {
-            let mut guard = slot.lock().expect("test latest-message slot");
-            *guard = Some(serde_json::json!({"leaked": true}));
-            panic!("poison test latest-message slot");
-        });
-
-        let mut guard = lock_latest_message_slot(&slot);
-        assert!(guard.is_none());
-        *guard = Some(serde_json::json!({"generation": 2}));
-        drop(guard);
-        assert!(!slot.is_poisoned());
-        assert_eq!(
-            lock_latest_message_slot(&slot).take(),
-            Some(serde_json::json!({"generation": 2}))
-        );
     }
 
     fn test_hit(timestamp: f64, damage: f64) -> Hit {

@@ -17,13 +17,14 @@ import {
 
 import statDisplayNames from "@res/data/abyss/monster_stat_names_zh_cn.json";
 
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import { DesktopTitlebar } from "@/components/nte/desktop-titlebar";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/form-controls";
 import { Skeleton } from "@/components/ui/skeleton";
-import { t, tf } from "@/lib/i18n";
+import { t, tf, useFrontendLanguage } from "@/lib/i18n";
 import {
   resolveCharacterAvatar,
   useCharacterAvatarCatalog,
@@ -62,6 +63,12 @@ type PageState =
   | { status: "ready"; snapshot: AbyssValuesSnapshot };
 
 const STAT_DISPLAY_NAMES: Readonly<Record<string, string>> = statDisplayNames;
+
+function formatMonsterStatKey(key: string): string {
+  return key
+    .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+}
 
 export function AbyssValuesPage() {
   const presentation = useSettingsPresentation();
@@ -554,16 +561,20 @@ function AbyssLineSection({
       { stars: 0, seconds: Math.min(maxSeconds ?? 90, 90) },
     ).seconds || 90;
   const [targetSeconds, setTargetSeconds] = useState(defaultTarget);
+  const [expanded, setExpanded] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const waves = summarizeWaves(monsters);
   const hp = lineTotalHp(monsters);
   const needDps = requiredDps(monsters, targetSeconds);
   const estimate = predictedSeconds(monsters, team);
-  const slots = monsters.slice(0, 6);
 
   useEffect(() => {
     setTargetSeconds(defaultTarget);
   }, [defaultTarget, maxSeconds]);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [monsters]);
 
   const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -625,6 +636,7 @@ function AbyssLineSection({
             )}
             <span className="text-muted-foreground">{t("Target")}</span>
             <Input
+              aria-label={t("Target")}
               className="h-7 w-[68px] px-2 text-right tabular-nums"
               type="number"
               min={1}
@@ -692,34 +704,43 @@ function AbyssLineSection({
       ) : null}
 
       <div className="mt-2 grid grid-cols-6 gap-1.5">
-        {slots.map((monster, index) =>
-          index === 5 && monsters.length > 6 ? (
-            <div
-              className="grid h-12 place-items-center rounded-md border text-sm text-muted-foreground"
-              key="more"
-              title={tf("{} more enemies not shown", [
-                String(monsters.length - 5),
-              ])}
-            >
-              +{monsters.length - 5}
-            </div>
-          ) : (
-            <MonsterChip
-              key={monster.packId}
-              monster={monster}
-              selected={monster.packId === selectedPackId}
-              onClick={() => onSelectMonster(monster.packId)}
-            />
-          ),
-        )}
-        {Array.from({ length: Math.max(0, 6 - slots.length) }, (_, index) => (
-          <div
-            className="grid h-12 place-items-center rounded-md border text-xs text-muted-foreground/50"
-            key={`empty:${index}`}
-          >
-            -
-          </div>
+        {(expanded || monsters.length <= 6
+          ? monsters
+          : monsters.slice(0, 5)
+        ).map((monster) => (
+          <MonsterChip
+            key={monster.packId}
+            monster={monster}
+            selected={monster.packId === selectedPackId}
+            onClick={() => onSelectMonster(monster.packId)}
+          />
         ))}
+        {monsters.length > 6 ? (
+          <button
+            className="grid h-12 place-items-center rounded-md border bg-background text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            key="toggle-more"
+            type="button"
+            aria-expanded={expanded}
+            title={
+              expanded
+                ? t("Collapse")
+                : tf("{} more enemies not shown", [String(monsters.length - 5)])
+            }
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {expanded ? t("Collapse") : `+${monsters.length - 5}`}
+          </button>
+        ) : null}
+        {monsters.length < 6
+          ? Array.from({ length: 6 - monsters.length }, (_, index) => (
+              <div
+                className="grid h-12 place-items-center rounded-md border text-xs text-muted-foreground/50"
+                key={`empty:${index}`}
+              >
+                -
+              </div>
+            ))
+          : null}
       </div>
     </section>
   );
@@ -790,6 +811,7 @@ function MonsterChip({
 }
 
 function AbyssMonsterDetail({ monster }: { monster: AbyssMonsterSnapshot }) {
+  const language = useFrontendLanguage();
   const stats = Object.entries(monster.rawProps);
   const image = monsterImageUrl(monster.monsterId);
   return (
@@ -841,7 +863,9 @@ function AbyssMonsterDetail({ monster }: { monster: AbyssMonsterSnapshot }) {
               className="truncate text-right text-muted-foreground"
               title={key}
             >
-              {STAT_DISPLAY_NAMES[key] ?? key}
+              {language === "zh-CN"
+                ? (STAT_DISPLAY_NAMES[key] ?? key)
+                : formatMonsterStatKey(key)}
             </span>
             <span className="text-right tabular-nums">
               {formatStatValue(value)}
@@ -945,24 +969,11 @@ function FloatingError({
   onDismiss: () => void;
 }) {
   return (
-    <Alert
-      className="fixed top-4 right-4 z-50 w-[min(28rem,calc(100vw-2rem))] bg-background/96 pr-10 shadow-lg backdrop-blur-sm"
-      variant="destructive"
-    >
-      <TriangleAlert aria-hidden="true" />
-      <AlertTitle>{t("Operation failed")}</AlertTitle>
-      <AlertDescription>
-        {tf(error.messageKey, error.messageArguments)}
-      </AlertDescription>
-      <Button
-        className="absolute top-1.5 right-1.5"
-        aria-label={t("Dismiss")}
-        size="icon-xs"
-        variant="ghost"
-        onClick={onDismiss}
-      >
-        <X aria-hidden="true" />
-      </Button>
-    </Alert>
+    <FloatingActionNotice
+      status="error"
+      message={t("Operation failed")}
+      detail={tf(error.messageKey, error.messageArguments)}
+      onDismiss={onDismiss}
+    />
   );
 }

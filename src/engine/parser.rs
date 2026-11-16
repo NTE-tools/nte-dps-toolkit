@@ -1017,10 +1017,9 @@ impl AbilityCatalog {
             if semantic.display_only {
                 continue;
             }
-            let skill = self
-                .skills
-                .get_mut(&effect_name)
-                .expect("GE semantics keys were validated against the skill catalog");
+            let Some(skill) = self.skills.get_mut(&effect_name) else {
+                continue;
+            };
             if let Some(ability_name) = semantic.ability {
                 skill.ability_name = Some(ability_name);
             }
@@ -1913,14 +1912,8 @@ pub(crate) fn parse_empty_curtain_compact_module_placements(
             if invalid.contains(&equipment) {
                 return None;
             }
-            let definition = catalog
-                .items
-                .get(&item_id)
-                .expect("compact module candidate must retain its catalog definition");
-            let shape = catalog
-                .shapes
-                .get(&definition.geometry)
-                .expect("catalog-validated module must have a shape");
+            let definition = catalog.items.get(&item_id)?;
+            let shape = catalog.shapes.get(&definition.geometry)?;
             let first_step = first_step?;
             let expected = shape
                 .cells
@@ -2014,14 +2007,8 @@ fn parse_empty_curtain_module_placements(
         }
     }
     for (item_id, occupied, first_step) in modules.values() {
-        let definition = catalog
-            .items
-            .get(*item_id)
-            .expect("validated module definitions must remain present");
-        let shape = catalog
-            .shapes
-            .get(&definition.geometry)
-            .expect("catalog-validated module must have a shape");
+        let definition = catalog.items.get(*item_id)?;
+        let shape = catalog.shapes.get(&definition.geometry)?;
         let Some(first_step) = first_step else {
             return None;
         };
@@ -2037,18 +2024,16 @@ fn parse_empty_curtain_module_placements(
             return None;
         }
     }
-    let mut placements = modules
-        .into_iter()
-        .map(|(equipment, (item_id, _, position))| {
-            let position = position.expect("validated modules must have one first cell");
-            ParsedEmptyCurtainModulePlacement {
-                equipment,
-                item_id: item_id.to_owned(),
-                row: position.row,
-                column: position.column,
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut placements = Vec::with_capacity(modules.len());
+    for (equipment, (item_id, _, position)) in modules {
+        let position = position?;
+        placements.push(ParsedEmptyCurtainModulePlacement {
+            equipment,
+            item_id: item_id.to_owned(),
+            row: position.row,
+            column: position.column,
+        });
+    }
     placements.sort_by_key(|placement| (placement.equipment.solt, placement.equipment.serial));
     Some(placements)
 }
@@ -2277,8 +2262,10 @@ pub(crate) fn parse_empty_curtain_item_additions(
                 break;
             };
             additions.push(item);
-            reader = InventoryBitReader::at(data, data_bit_len, next_offset)
-                .expect("a parsed inventory item must end inside the packet");
+            let Some(next_reader) = InventoryBitReader::at(data, data_bit_len, next_offset) else {
+                break;
+            };
+            reader = next_reader;
         }
         if additions.len() == item_count {
             return additions;
@@ -2322,8 +2309,10 @@ pub(crate) fn parse_empty_curtain_item_removals(
                 break;
             };
             removals.push((item.id, item.item_id));
-            reader = InventoryBitReader::at(data, data_bit_len, next_offset)
-                .expect("a parsed inventory item must end inside the packet");
+            let Some(next_reader) = InventoryBitReader::at(data, data_bit_len, next_offset) else {
+                break;
+            };
+            reader = next_reader;
         }
         if removals.len() == item_count {
             return removals;
@@ -3358,11 +3347,13 @@ pub fn parse_gameplay_effects(data: &[u8]) -> Vec<ParsedGameplayEffect> {
                 continue;
             }
             let index_offset = marker_offset + 1;
-            let unique_index = u32::from_le_bytes(
-                shifted[index_offset..index_offset + 4]
-                    .try_into()
-                    .expect("Compact GameplayEffect index has a fixed four-byte length"),
-            );
+            let Some(index_bytes) = shifted
+                .get(index_offset..index_offset + 4)
+                .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            else {
+                continue;
+            };
+            let unique_index = u32::from_le_bytes(index_bytes);
             if matches!(unique_index, 0 | u32::MAX)
                 || !seen.insert((unique_index, bit_shift, index_offset))
             {

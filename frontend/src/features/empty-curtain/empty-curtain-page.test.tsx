@@ -33,7 +33,9 @@ describe("User plugin equipment inventory", () => {
         'disabled=""',
       );
     expect(html).toContain("Equipment is read-only");
-    expect(html).not.toContain("Right-click equipment to manage");
+    expect(html).not.toContain(
+      "Click or right-click equipment to manage it through the plugin",
+    );
   });
   it("shows confirmation in progress instead of a failed-operation notice", () => {
     setFrontendLanguage("en");
@@ -76,10 +78,9 @@ describe("User plugin equipment inventory", () => {
       "Filter",
       "Export for Drive Calculator",
       "Character Equipment",
-      "Right-click equipment to manage it through the plugin",
+      "Click or right-click equipment to manage it through the plugin",
     ])
       expect(html).toContain(label);
-    expect(html).not.toContain("Legacy equipment changes are not supported");
   });
   it("does not require packet capture to fill an empty inventory", () => {
     setFrontendLanguage("en");

@@ -1,6 +1,8 @@
 import type { PluginFormActionRequest } from "@/lib/tauri/generated/PluginFormActionRequest";
 import { Component, useEffect, useRef, useState, type ReactNode } from "react";
-import { ActionNotice } from "@/components/nte/action-notice";
+import { TriangleAlert } from "lucide-react";
+import { FloatingActionNotice } from "@/components/nte/action-notice";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { t, useFrontendLanguage } from "@/lib/i18n";
 import { invokeCommand } from "@/lib/tauri/command-error";
 import type { PluginFormSnapshot } from "@/lib/tauri/generated/PluginFormSnapshot";
@@ -18,12 +20,14 @@ class FormBoundary extends Component<
   }
   render() {
     return this.state.failed ? (
-      <ActionNotice
-        status="error"
-        message={t(
-          "The plugin interface could not be rendered. Refresh or update the plugin.",
-        )}
-      />
+      <Alert variant="destructive">
+        <TriangleAlert aria-hidden="true" />
+        <AlertDescription>
+          {t(
+            "The plugin interface could not be rendered. Refresh or update the plugin.",
+          )}
+        </AlertDescription>
+      </Alert>
     ) : (
       this.props.children
     );
@@ -61,6 +65,11 @@ export function PluginFormPanel({
       lifetime.value++;
     };
   }, []);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(false), 3500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const translate = (key: string) =>
     snapshot.form.translations[language]?.[key] ?? t(key);
   const execute = (id: string, inputData?: unknown, confirmed = false) => {
@@ -123,10 +132,11 @@ export function PluginFormPanel({
         />
       </FormBoundary>
       {notice && (
-        <ActionNotice
+        <FloatingActionNotice
           status="success"
           compact
           message={t("Request submitted.")}
+          onDismiss={() => setNotice(false)}
         />
       )}
       {result && <NativeResponse result={result} />}

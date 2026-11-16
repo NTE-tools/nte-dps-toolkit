@@ -55,7 +55,6 @@ pub(crate) async fn download_main_dps_update(
     window: WebviewWindow,
 ) -> Result<UpdatePromptSnapshot, CommandError> {
     main_dps::validate_window(&window)?;
-    let component = settings::app_update_component(component)?;
     let state = state.inner().clone();
     settings::run_update_download(state.clone(), component).await?;
     Ok(UpdatePromptSnapshot::from_updates(
@@ -129,18 +128,13 @@ pub(crate) async fn reset_main_dps_session(
 ) -> Result<MainDpsResetResult, CommandError> {
     main_dps::validate_window(&window)?;
     state.ensure_session_undo_runtime_available()?;
-    let active = matches!(
-        state.capture_phase(),
-        nte_dps_tool::core::live_capture::LiveCapturePhase::Starting
-            | nte_dps_tool::core::live_capture::LiveCapturePhase::Running
-            | nte_dps_tool::core::live_capture::LiveCapturePhase::Stopping
-    ) || state.replay_running()?;
-    if active && !confirmed {
-        return Err(confirmation_required());
-    }
     let state = state.inner().clone();
     let worker_state = state.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let active = worker_state.is_capture_or_replay_active()?;
+        if active && !confirmed {
+            return Err(confirmation_required());
+        }
         let undo_token = if active {
             worker_state.stop_active_capture_and_wait(std::time::Duration::from_secs(5))?;
             worker_state.clear_session_action()?;
@@ -148,8 +142,6 @@ pub(crate) async fn reset_main_dps_session(
         } else {
             worker_state.reset_session_with_undo_action()?
         };
-        worker_state.set_main_processing_paused(false)?;
-        worker_state.set_main_selected_round_id(None)?;
         Ok::<_, CommandError>(MainDpsResetResult {
             snapshot: snapshot(&worker_state)?,
             undo_token,
@@ -157,17 +149,7 @@ pub(crate) async fn reset_main_dps_session(
     })
     .await
     .map_err(|_| CommandError::new("reset_failed", "Failed to reset the current session"))??;
-    state.publish_island_notice(
-        IslandTone::Success,
-        if result.undo_token.is_some() {
-            "Session reset. Use Undo within 5 seconds."
-        } else {
-            "Stats reset"
-        },
-        Vec::new(),
-        result.undo_token.clone(),
-    );
-    island::show_notice(&app, &state)?;
+    island::publish_reset_notice(&app, &state, result.undo_token.clone());
     Ok(result)
 }
 

@@ -1,5 +1,6 @@
 import { Tabs } from "@base-ui/react/tabs";
 import { Input } from "@/components/ui/form-controls";
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import { HudModuleSortableList } from "@/components/nte/hud-module-sortable";
 import {
   PageHeader,
@@ -7,7 +8,6 @@ import {
   PageScrollArea,
 } from "@/components/nte/page-layout";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { createPortal } from "react-dom";
 import {
   ArrowDown,
   ArrowUp,
@@ -17,7 +17,6 @@ import {
   Pin,
   SlidersHorizontal,
   TriangleAlert,
-  X,
 } from "lucide-react";
 
 import {
@@ -50,11 +49,7 @@ import {
   SettingsCatalog,
   type SettingsCatalogActions,
 } from "./settings-catalog";
-import {
-  adjacentHudModuleMove,
-  hudModuleVisible,
-  settingsSectionPending,
-} from "./settings-view-model";
+import { adjacentHudModuleMove, hudModuleVisible } from "./settings-view-model";
 import { useSettings } from "./use-settings";
 
 const SETTINGS_SECTIONS = ["Interface", "HUD", "Capture and data"] as const;
@@ -152,9 +147,9 @@ function SettingsReady({
   onSetModuleVisibility: (module: HudModule, visible: boolean) => Promise<void>;
   onSetWidth: (width: number) => Promise<void>;
 }) {
-  const windowPending = settingsSectionPending(pendingAction, "hud-window");
-  const modulesPending = settingsSectionPending(pendingAction, "hud-modules");
-  const editorPending = settingsSectionPending(pendingAction, "hud-editor");
+  const windowPending = pendingAction !== null;
+  const modulesPending = pendingAction !== null;
+  const editorPending = pendingAction !== null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -517,29 +512,12 @@ function MutationError({
   error: CommandError;
   onDismiss: () => void;
 }) {
-  return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-4 z-[100] flex justify-center px-4">
-      <Alert
-        className="pointer-events-auto w-full max-w-lg bg-background pr-10 shadow-xl"
-        variant="destructive"
-      >
-        <TriangleAlert aria-hidden="true" />
-        <AlertTitle>{t("Setting was not saved")}</AlertTitle>
-        <AlertDescription>
-          {tf(error.messageKey, error.messageArguments)}
-        </AlertDescription>
-        <AlertAction>
-          <Button
-            aria-label={t("Dismiss")}
-            size="icon-xs"
-            variant="ghost"
-            onClick={onDismiss}
-          >
-            <X aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
-    </div>,
-    document.body,
+  return (
+    <FloatingActionNotice
+      status="error"
+      message={t("Setting was not saved")}
+      detail={tf(error.messageKey, error.messageArguments)}
+      onDismiss={onDismiss}
+    />
   );
 }

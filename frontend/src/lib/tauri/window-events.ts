@@ -1,8 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export const MAIN_DPS_CONFIRMATION_REQUESTED_EVENT =
-  "main-dps-confirmation-requested";
-export const CONSOLE_NAVIGATE_EVENT = "console-navigate";
+const MAIN_DPS_CONFIRMATION_REQUESTED_EVENT = "main-dps-confirmation-requested";
+const CONSOLE_NAVIGATE_EVENT = "console-navigate";
 
 export function subscribeMainDpsConfirmationRequested(
   onRequested: (payload: "start" | "reset") => void,

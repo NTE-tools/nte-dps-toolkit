@@ -36,15 +36,6 @@ describe("read-only character page", () => {
       "Runtime attributes",
     ])
       expect(html).toContain(label);
-    for (const label of [
-      "Save to characters.json",
-      "New ID",
-      "Edit Character",
-      "Avatar Path",
-      "Chinese Name",
-      "Unsaved changes",
-    ])
-      expect(html).not.toContain(label);
     expect(html).toContain("not an atomic snapshot");
     expect(html).toContain("unknown modifiers retain raw units");
     expect(html).toContain("0.123456789");

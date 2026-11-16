@@ -4,7 +4,8 @@ use nte_dps_tool::engine::model::CombatClockRuntimeHealth;
 
 use crate::{
     channels::stream_runtime::{
-        PollingStreamOutput, StreamDeliveryEndpoint, spawn_polling_stream, validate_subscription_id,
+        PollingStreamOutput, subscribe_blocking_polling_stream, unsubscribe_stream,
+        validate_subscription_id,
     },
     contract::{CommandError, SubscriptionReceipt, settings::SettingsEvent, stream::StreamKind},
     state::{AppState, UpdateActionError},
@@ -22,21 +23,17 @@ pub(crate) fn subscribe_settings(
     validate_subscription_id(&subscription_id)?;
     console::validate_window(&window)?;
 
-    let stream_kind = StreamKind::Settings;
-    let stream_key = stream_kind.stream_key(&subscription_id);
-    let state = state.inner().clone();
-    let registration = state.reserve_stream(window.label(), &stream_key)?;
-    let stream_generation = registration.generation();
     let mut last_revision = None;
     let mut last_install_blocker = None;
     let mut last_combat_clock_health = None;
-    spawn_polling_stream(
-        "nte-settings-stream",
-        StreamDeliveryEndpoint::new(on_event),
-        state,
-        registration,
+    subscribe_blocking_polling_stream(
+        subscription_id,
+        StreamKind::Settings,
         SETTINGS_STREAM_INTERVAL_MS,
-        move |state| {
+        on_event,
+        state.inner(),
+        &window,
+        move |state, _stop| {
             let install_blocker = state.update_install_blocked_message_key();
             let runtime_projection_changed =
                 update_runtime_projection_changed(last_install_blocker.as_ref(), &install_blocker);
@@ -58,14 +55,7 @@ pub(crate) fn subscribe_settings(
             last_revision = Some(revision);
             PollingStreamOutput::Event(SettingsEvent::Snapshot(state.settings_snapshot()))
         },
-    )?;
-
-    Ok(SubscriptionReceipt::new(
-        subscription_id,
-        stream_kind,
-        stream_generation,
-        SETTINGS_STREAM_INTERVAL_MS,
-    ))
+    )
 }
 
 #[tauri::command]
@@ -74,13 +64,13 @@ pub(crate) fn unsubscribe_settings(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    console::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::Settings.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::Settings,
+        state.inner(),
+        &window,
+        console::validate_window,
+    )
 }
 
 fn should_emit_snapshot(last_revision: Option<u64>, current_revision: u64) -> bool {

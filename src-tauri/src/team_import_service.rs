@@ -1,6 +1,5 @@
 use std::sync::Mutex;
 
-use nte_dps_tool::core::sync::lock_or_repair;
 use nte_dps_tool::engine::model::{TeamDps, TeamDpsExport};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -10,9 +9,7 @@ pub(crate) struct ImportedTeams {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TeamImportError {
-    pub(crate) newly_unavailable: bool,
-}
+pub(crate) struct TeamImportError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TeamMutationOutcome {
@@ -24,60 +21,32 @@ pub(crate) struct TeamImportStatus {
     pub(crate) available: bool,
     pub(crate) upper_imported: bool,
     pub(crate) lower_imported: bool,
-    pub(crate) newly_unavailable: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum TeamImportState {
-    Ready(ImportedTeams),
-    Unavailable,
-}
-
-impl Default for TeamImportState {
-    fn default() -> Self {
-        Self::Ready(ImportedTeams::default())
-    }
 }
 
 #[derive(Default)]
 pub(crate) struct TeamImportService {
-    state: Mutex<TeamImportState>,
+    state: Mutex<ImportedTeams>,
 }
 
 impl TeamImportService {
-    pub(crate) fn snapshot(
-        &self,
-        on_unavailable: impl Fn(),
-    ) -> Result<ImportedTeams, TeamImportError> {
-        let (state, recovered) = lock_or_repair(&self.state, close_team_import);
-        if recovered {
-            on_unavailable();
-            log::warn!("Imported team state was closed after an interrupted update");
-            return Err(TeamImportError {
-                newly_unavailable: true,
-            });
-        }
-        match &*state {
-            TeamImportState::Ready(teams) => Ok(teams.clone()),
-            TeamImportState::Unavailable => Err(TeamImportError {
-                newly_unavailable: false,
-            }),
-        }
+    pub(crate) fn snapshot(&self) -> Result<ImportedTeams, TeamImportError> {
+        self.state
+            .lock()
+            .map(|teams| teams.clone())
+            .map_err(|_| TeamImportError)
     }
 
-    pub(crate) fn status(&self, on_unavailable: impl Fn()) -> TeamImportStatus {
-        match self.snapshot(on_unavailable) {
+    pub(crate) fn status(&self) -> TeamImportStatus {
+        match self.snapshot() {
             Ok(teams) => TeamImportStatus {
                 available: true,
                 upper_imported: teams.upper.is_some(),
                 lower_imported: teams.lower.is_some(),
-                newly_unavailable: false,
             },
-            Err(error) => TeamImportStatus {
+            Err(_) => TeamImportStatus {
                 available: false,
                 upper_imported: false,
                 lower_imported: false,
-                newly_unavailable: error.newly_unavailable,
             },
         }
     }
@@ -174,38 +143,13 @@ impl TeamImportService {
         update: impl FnOnce(&mut ImportedTeams) -> bool,
         on_change: impl Fn(),
     ) -> Result<TeamMutationOutcome, TeamImportError> {
-        let (mut state, recovered) = lock_or_repair(&self.state, close_team_import);
-        if recovered {
+        let mut teams = self.state.lock().map_err(|_| TeamImportError)?;
+        let changed = update(&mut teams);
+        if changed {
             on_change();
-            return Err(TeamImportError {
-                newly_unavailable: true,
-            });
         }
-        match &mut *state {
-            TeamImportState::Ready(teams) => {
-                let changed = update(teams);
-                if changed {
-                    on_change();
-                }
-                Ok(TeamMutationOutcome { changed })
-            }
-            TeamImportState::Unavailable => Err(TeamImportError {
-                newly_unavailable: false,
-            }),
-        }
+        Ok(TeamMutationOutcome { changed })
     }
-
-    #[cfg(test)]
-    pub(crate) fn poison_for_test(&self) {
-        let _ = std::panic::catch_unwind(|| {
-            let _state = self.state.lock().expect("healthy team state");
-            panic!("poison imported team state");
-        });
-    }
-}
-
-fn close_team_import(state: &mut TeamImportState) {
-    *state = TeamImportState::Unavailable;
 }
 
 #[cfg(test)]
@@ -248,7 +192,7 @@ mod tests {
                 .changed
         );
         assert_eq!(publications.load(Ordering::Acquire), 1);
-        let snapshot = service.snapshot(|| {}).expect("snapshot");
+        let snapshot = service.snapshot().expect("snapshot");
         assert_eq!(snapshot.upper.expect("upper").dps, 10.0);
         assert_eq!(snapshot.lower.expect("lower").dps, 20.0);
     }
@@ -267,42 +211,5 @@ mod tests {
             .expect("replace upper");
         assert!(service.swap(|| {}).expect("swap distinct halves").changed);
         assert!(service.swap(|| {}).expect("swap back").changed);
-    }
-
-    #[test]
-    fn poisoned_team_state_never_projects_partial_data_as_empty() {
-        let service = TeamImportService::default();
-        service
-            .replace_half(true, team(10.0), || {})
-            .expect("replace upper");
-        let _ = std::panic::catch_unwind(|| {
-            let mut state = service.state.lock().expect("healthy team state");
-            *state = TeamImportState::Ready(ImportedTeams {
-                upper: None,
-                lower: Some(team(99.0)),
-            });
-            panic!("interrupt two-half mutation");
-        });
-
-        let error = service
-            .snapshot(|| {})
-            .expect_err("poison must fail closed");
-        assert!(error.newly_unavailable);
-        let status = service.status(|| {});
-        assert!(!status.available);
-        assert!(!status.upper_imported);
-        assert!(!status.lower_imported);
-    }
-
-    #[test]
-    fn unavailable_team_state_does_not_overwrite_the_other_half() {
-        let service = TeamImportService::default();
-        let _ = std::panic::catch_unwind(|| {
-            let _state = service.state.lock().expect("healthy team state");
-            panic!("interrupt team mutation");
-        });
-
-        assert!(service.replace_half(false, team(30.0), || {}).is_err());
-        assert!(service.snapshot(|| {}).is_err());
     }
 }

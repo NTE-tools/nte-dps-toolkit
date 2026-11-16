@@ -121,7 +121,7 @@ export function HostLoadingControls({
           >
             <AlertDialogPortal>
               <AlertDialogBackdrop />
-              <AlertDialogPopup className="left-1/2 top-1/2 flex w-[min(90vw,30rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-lg">
+              <AlertDialogPopup className="left-1/2 top-1/2 flex w-[min(90vw,30rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-xl">
                 <AlertDialogTitle>{t("Uninstall proxy")}</AlertDialogTitle>
                 <AlertDialogDescription>
                   {t(
@@ -134,12 +134,14 @@ export function HostLoadingControls({
                 <div className="flex justify-end gap-2">
                   <Button
                     variant="outline"
+                    autoFocus
                     disabled={pending}
                     onClick={() => setConfirmRemoval(false)}
                   >
                     {t("Cancel")}
                   </Button>
                   <Button
+                    variant="destructive"
                     disabled={pending}
                     onClick={() =>
                       void run(async () => {

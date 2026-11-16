@@ -1,6 +1,5 @@
 use std::{
     fs::File,
-    future::Future,
     io::Read,
     path::Path,
     sync::{
@@ -26,7 +25,7 @@ use nte_dps_tool::{
         },
         i18n,
         io_util::atomic_write_text,
-        update::{self as update_storage, PreparedUpdate, installed_component_versions},
+        update as update_storage,
     },
 };
 use serde::Deserialize;
@@ -42,7 +41,6 @@ use crate::{
         },
     },
     file_dialog::{self, DialogOutcome},
-    settings_service::SettingsServiceError,
     state::{AppState, HudPreset, HudSettingOption, UpdateActionError},
     windows::{abyss_values, combat_details, console, hud, island, main_dps},
 };
@@ -70,18 +68,16 @@ pub(crate) fn set_settings_interface(
         return Err(CommandError::invalid_settings_input());
     }
     let language = settings.language;
-    state
-        .update_interface_settings(
-            language,
-            settings.dark_mode,
-            settings.theme_preset,
-            settings.accent,
-            settings.density,
-            settings.reduce_motion,
-            settings.island_notifications,
-            settings.island_offset_x,
-        )
-        .map_err(settings_save_error)?;
+    state.update_interface_settings(
+        language,
+        settings.dark_mode,
+        settings.theme_preset,
+        settings.accent,
+        settings.density,
+        settings.reduce_motion,
+        settings.island_notifications,
+        settings.island_offset_x,
+    )?;
     nte_dps_tool::storage::i18n::set_language(language);
     if let Some(error) = nte_dps_tool::storage::ability_names::reload(language) {
         log::warn!("reload localized ability names after language change failed: {error}");
@@ -110,9 +106,7 @@ pub(crate) fn set_settings_update_preferences(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state
-        .update_update_settings(settings.auto_check, settings.auto_download)
-        .map_err(settings_save_error)?;
+    state.update_update_settings(settings.auto_check, settings.auto_download)?;
     Ok(state.settings_snapshot())
 }
 
@@ -134,7 +128,6 @@ pub(crate) async fn download_settings_update(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    let component = app_update_component(component)?;
     let state = state.inner().clone();
     run_update_download(state.clone(), component).await?;
     Ok(state.settings_snapshot())
@@ -159,54 +152,22 @@ pub(crate) async fn install_update(
     app: AppHandle,
     state: AppState,
 ) -> Result<(), UpdateActionError> {
-    install_update_with(state, move |prepared, state| async move {
-        let version = prepared.version().to_string();
-        match prepared.component() {
-            UpdateComponent::App => match update_storage::launch_prepared_app_update(&prepared) {
-                Ok(_) => {
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_millis(200));
-                        app.exit(0);
-                    });
-                }
-                Err(error) => {
-                    log::error!("launch prepared application update failed: {error}");
-                    state.fail_update_install()?;
-                }
-            },
-            UpdateComponent::ModsPlugin => {
-                let result = tauri::async_runtime::spawn_blocking(move || {
-                    update_storage::install_prepared_plugin_update(&prepared)
-                })
-                .await;
-                match result {
-                    Ok(Ok(())) => state.finish_plugin_update_install(version)?,
-                    Ok(Err(error)) => {
-                        log::error!("install prepared Mod loader update failed: {error}");
-                        state.fail_update_install()?;
-                    }
-                    Err(error) => {
-                        log::error!("Mod loader update worker failed: {error}");
-                        state.fail_update_install()?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    })
-    .await
-}
-
-async fn install_update_with<Start, Worker>(
-    state: AppState,
-    start: Start,
-) -> Result<(), UpdateActionError>
-where
-    Start: FnOnce(PreparedUpdate, AppState) -> Worker,
-    Worker: Future<Output = Result<(), UpdateActionError>>,
-{
     let prepared = state.begin_update_install()?;
-    start(prepared, state).await
+    match prepared.component() {
+        UpdateComponent::App => match update_storage::launch_prepared_app_update(&prepared) {
+            Ok(_) => {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(200));
+                    app.exit(0);
+                });
+            }
+            Err(error) => {
+                log::error!("launch prepared application update failed: {error}");
+                state.fail_update_install()?;
+            }
+        },
+    }
+    Ok(())
 }
 
 pub(crate) fn schedule_automatic_update_check(app: AppHandle, state: AppState) {
@@ -231,7 +192,6 @@ pub(crate) fn schedule_automatic_update_check(app: AppHandle, state: AppState) {
 }
 
 pub(crate) fn schedule_completed_update_cleanup() {
-    update_storage::cleanup_completed_update_staging();
     match update_storage::mark_update_healthy_from_environment() {
         Ok(Some(marker)) => {
             std::thread::spawn(move || update_storage::cleanup_completed_app_update(marker));
@@ -242,28 +202,15 @@ pub(crate) fn schedule_completed_update_cleanup() {
 }
 
 async fn run_update_check(state: AppState) -> Result<(), UpdateActionError> {
-    run_update_check_with(state, || async {
-        match tauri::async_runtime::spawn_blocking(check_for_updates).await {
-            Ok(result) => result,
-            Err(error) => {
-                log::error!("Settings update worker failed: {error}");
-                Err(CheckSettingsUpdateError::WorkerFailed)
-            }
-        }
-    })
-    .await
-}
-
-async fn run_update_check_with<Start, Worker>(
-    state: AppState,
-    start: Start,
-) -> Result<(), UpdateActionError>
-where
-    Start: FnOnce() -> Worker,
-    Worker: Future<Output = Result<Vec<AvailableComponentUpdate>, CheckSettingsUpdateError>>,
-{
     state.begin_update_check()?;
-    match start().await {
+    let check_result = match tauri::async_runtime::spawn_blocking(check_for_updates).await {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!("Settings update worker failed: {error}");
+            Err(CheckSettingsUpdateError::WorkerFailed)
+        }
+    };
+    match check_result {
         Ok(updates) => {
             let auto_download = state
                 .auto_download_updates()
@@ -293,62 +240,40 @@ pub(crate) async fn run_update_download(
     state: AppState,
     component: UpdateComponent,
 ) -> Result<(), UpdateActionError> {
-    run_update_download_with(state, component, |update, progress_state| async move {
-        let runtime_unavailable = Arc::new(AtomicBool::new(false));
-        let progress_runtime_unavailable = Arc::clone(&runtime_unavailable);
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            let mut last_progress = Instant::now() - UPDATE_PROGRESS_INTERVAL;
-            update_storage::prepare_update(&update, |downloaded, total| {
-                let now = Instant::now();
-                if downloaded == total
-                    || now.saturating_duration_since(last_progress) >= UPDATE_PROGRESS_INTERVAL
-                {
-                    last_progress = now;
-                    if matches!(
-                        progress_state.update_download_progress(component, downloaded, total),
-                        Err(UpdateActionError::RuntimeUnavailable)
-                    ) {
-                        progress_runtime_unavailable.store(true, Ordering::Release);
-                    }
-                }
-            })
-        })
-        .await;
-        if runtime_unavailable.load(Ordering::Acquire) {
-            return Err(UpdateDownloadWorkerError::RuntimeUnavailable);
-        }
-        match result {
-            Ok(Ok(prepared)) => Ok(prepared),
-            Ok(Err(error)) => {
-                log::error!("prepare signed update failed: {error}");
-                Err(UpdateDownloadWorkerError::Failed)
-            }
-            Err(error) => {
-                log::error!("update download worker failed: {error}");
-                Err(UpdateDownloadWorkerError::Failed)
-            }
-        }
-    })
-    .await
-}
-
-async fn run_update_download_with<Start, Worker>(
-    state: AppState,
-    component: UpdateComponent,
-    start: Start,
-) -> Result<(), UpdateActionError>
-where
-    Start: FnOnce(AvailableComponentUpdate, AppState) -> Worker,
-    Worker: Future<Output = Result<PreparedUpdate, UpdateDownloadWorkerError>>,
-{
     let update = state.begin_update_download(component)?;
-    match start(update, state.clone()).await {
-        Ok(prepared) => state.finish_update_download(prepared)?,
-        Err(UpdateDownloadWorkerError::Failed) => {
+    let runtime_unavailable = Arc::new(AtomicBool::new(false));
+    let progress_runtime_unavailable = Arc::clone(&runtime_unavailable);
+    let progress_state = state.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut last_progress = Instant::now() - UPDATE_PROGRESS_INTERVAL;
+        update_storage::prepare_update(&update, |downloaded, total| {
+            let now = Instant::now();
+            if downloaded == total
+                || now.saturating_duration_since(last_progress) >= UPDATE_PROGRESS_INTERVAL
+            {
+                last_progress = now;
+                if matches!(
+                    progress_state.update_download_progress(component, downloaded, total),
+                    Err(UpdateActionError::RuntimeUnavailable)
+                ) {
+                    progress_runtime_unavailable.store(true, Ordering::Release);
+                }
+            }
+        })
+    })
+    .await;
+    if runtime_unavailable.load(Ordering::Acquire) {
+        return Err(UpdateActionError::RuntimeUnavailable);
+    }
+    match result {
+        Ok(Ok(prepared)) => state.finish_update_download(prepared)?,
+        Ok(Err(error)) => {
+            log::error!("prepare signed update failed: {error}");
             state.fail_update_download()?;
         }
-        Err(UpdateDownloadWorkerError::RuntimeUnavailable) => {
-            return Err(UpdateActionError::RuntimeUnavailable);
+        Err(error) => {
+            log::error!("update download worker failed: {error}");
+            state.fail_update_download()?;
         }
     }
     Ok(())
@@ -387,18 +312,16 @@ pub(crate) fn set_settings_capture(
             CommandError::hotkey_conflict()
         });
     }
-    state
-        .update_capture_settings(
-            filter,
-            manual_device,
-            settings.server_damage_calibration,
-            settings.include_max_hp_reduction_in_total_damage,
-            settings.separate_reaction_damage,
-            settings.auto_round_after_idle,
-            settings.auto_round_idle_seconds,
-            passthrough_hotkey,
-        )
-        .map_err(settings_save_error)?;
+    state.update_capture_settings(
+        filter,
+        manual_device,
+        settings.server_damage_calibration,
+        settings.include_max_hp_reduction_in_total_damage,
+        settings.separate_reaction_damage,
+        settings.auto_round_after_idle,
+        settings.auto_round_idle_seconds,
+        passthrough_hotkey,
+    )?;
     refresh_hotkey_configuration(&state);
     Ok(state.settings_snapshot())
 }
@@ -427,9 +350,7 @@ pub(crate) fn set_settings_hotkeys_enabled(
     console::validate_window(&window)?;
     let mut hotkeys = state.global_hotkeys();
     hotkeys.enabled = enabled;
-    state
-        .update_global_hotkeys(hotkeys)
-        .map_err(settings_save_error)?;
+    state.update_global_hotkeys(hotkeys)?;
     refresh_hotkey_configuration(&state);
     Ok(state.settings_snapshot())
 }
@@ -453,9 +374,7 @@ pub(crate) fn set_settings_hotkey_binding(
         return Err(CommandError::hotkey_conflict());
     }
     hotkeys.set_binding(action, binding);
-    state
-        .update_global_hotkeys(hotkeys)
-        .map_err(settings_save_error)?;
+    state.update_global_hotkeys(hotkeys)?;
     refresh_hotkey_configuration(&state);
     Ok(state.settings_snapshot())
 }
@@ -467,9 +386,7 @@ pub(crate) fn set_settings_main_dps_display(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state
-        .update_main_dps_display(settings)
-        .map_err(settings_save_error)?;
+    state.update_main_dps_display(settings)?;
     Ok(state.settings_snapshot())
 }
 
@@ -492,12 +409,8 @@ pub(crate) fn apply_settings_layout_profile(
             if !state.passthrough_hotkey_ready() {
                 return Err(CommandError::passthrough_hotkey_unavailable());
             }
-            state
-                .set_density(UiDensity::Compact)
-                .map_err(settings_save_error)?;
-            state
-                .apply_hud_preset(HudPreset::Minimal)
-                .map_err(settings_save_error)?;
+            state.set_density(UiDensity::Compact)?;
+            state.apply_hud_preset(HudPreset::Minimal)?;
             hud_window.show().map_err(window_operation_error)?;
             hud::set_passthrough(&hud_window, &state, true)?;
             window.hide().map_err(window_operation_error)?;
@@ -509,9 +422,7 @@ pub(crate) fn apply_settings_layout_profile(
             }
         }
         LayoutProfile::Review => {
-            state
-                .set_density(UiDensity::Cozy)
-                .map_err(settings_save_error)?;
+            state.set_density(UiDensity::Cozy)?;
             hud::set_passthrough(&hud_window, &state, false)?;
             hud_window.hide().map_err(window_operation_error)?;
             window.set_focus().map_err(window_operation_error)?;
@@ -526,9 +437,7 @@ pub(crate) fn apply_settings_layout_profile(
             }
         }
         LayoutProfile::Research => {
-            state
-                .set_density(UiDensity::Compact)
-                .map_err(settings_save_error)?;
+            state.set_density(UiDensity::Compact)?;
             hud::set_passthrough(&hud_window, &state, false)?;
             hud_window.hide().map_err(window_operation_error)?;
             window.set_focus().map_err(window_operation_error)?;
@@ -717,9 +626,7 @@ pub(crate) fn set_settings_hud_option(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state
-        .set_hud_option(option, enabled)
-        .map_err(config_save_error)?;
+    state.set_hud_option(option, enabled)?;
     sync_hud_height(&app, &state);
     Ok(state.settings_snapshot())
 }
@@ -732,7 +639,7 @@ pub(crate) fn apply_settings_hud_preset(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state.apply_hud_preset(preset).map_err(config_save_error)?;
+    state.apply_hud_preset(preset)?;
     sync_hud_height(&app, &state);
     Ok(state.settings_snapshot())
 }
@@ -746,9 +653,7 @@ pub(crate) fn set_settings_hud_module_visibility(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state
-        .set_hud_module_visibility(module, visible)
-        .map_err(config_save_error)?;
+    state.set_hud_module_visibility(module, visible)?;
     sync_hud_height(&app, &state);
     Ok(state.settings_snapshot())
 }
@@ -763,9 +668,7 @@ pub(crate) fn move_settings_hud_module(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state
-        .move_hud_module(dragged, target, insert_after)
-        .map_err(config_save_error)?;
+    state.move_hud_module(dragged, target, insert_after)?;
     sync_hud_height(&app, &state);
     Ok(state.settings_snapshot())
 }
@@ -778,7 +681,7 @@ pub(crate) fn set_settings_hud_width(
     window: WebviewWindow,
 ) -> Result<SettingsSnapshot, CommandError> {
     console::validate_window(&window)?;
-    state.set_hud_width(width).map_err(config_save_error)?;
+    state.set_hud_width(width)?;
     if let Some(hud_window) = app.get_webview_window(hud::HUD_WINDOW_LABEL)
         && let Err(error) = hud::sync_content_width(&hud_window, &state)
     {
@@ -860,19 +763,6 @@ fn serialize_team_data(
     Ok(json)
 }
 
-fn config_save_error(error: SettingsServiceError) -> CommandError {
-    log::error!("save HUD configuration from Settings failed: {error:?}");
-    match error {
-        SettingsServiceError::ConfigSave => CommandError::hud_config_save_failed(),
-        SettingsServiceError::TransactionUnavailable => {
-            CommandError::settings_transaction_unavailable()
-        }
-        SettingsServiceError::PassthroughUnavailable => {
-            CommandError::passthrough_state_unavailable()
-        }
-    }
-}
-
 fn hud_window(app: &AppHandle) -> Result<WebviewWindow, CommandError> {
     app.get_webview_window(hud::HUD_WINDOW_LABEL)
         .ok_or_else(CommandError::window_operation_failed)
@@ -891,30 +781,11 @@ fn window_operation_error(error: tauri::Error) -> CommandError {
     CommandError::window_operation_failed()
 }
 
-fn settings_save_error(error: SettingsServiceError) -> CommandError {
-    log::error!("save Settings configuration failed: {error:?}");
-    match error {
-        SettingsServiceError::ConfigSave => CommandError::settings_config_save_failed(),
-        SettingsServiceError::TransactionUnavailable => {
-            CommandError::settings_transaction_unavailable()
-        }
-        SettingsServiceError::PassthroughUnavailable => {
-            CommandError::passthrough_state_unavailable()
-        }
-    }
-}
-
 #[derive(Debug)]
 enum CheckSettingsUpdateError {
     NotConfigured,
     Failed(String),
     WorkerFailed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UpdateDownloadWorkerError {
-    Failed,
-    RuntimeUnavailable,
 }
 
 fn check_for_updates() -> Result<Vec<AvailableComponentUpdate>, CheckSettingsUpdateError> {
@@ -927,28 +798,10 @@ fn check_for_updates() -> Result<Vec<AvailableComponentUpdate>, CheckSettingsUpd
     };
     let manifest = update_http::get_bytes(&endpoint.manifest_url, MAX_MANIFEST_BYTES)
         .map_err(|error| CheckSettingsUpdateError::Failed(error.to_string()))?;
-    let app = installed_app_version(env!("CARGO_PKG_VERSION"))
-        .map_err(|error| CheckSettingsUpdateError::Failed(error.to_string()))?
-        .app;
-    let installed = installed_component_versions(app)
+    let installed = installed_app_version(env!("CARGO_PKG_VERSION"))
         .map_err(|error| CheckSettingsUpdateError::Failed(error.to_string()))?;
     verify_manifest(&manifest, &endpoint, &installed)
-        .map(|updates| {
-            updates
-                .into_iter()
-                .filter(|u| u.component == UpdateComponent::App)
-                .collect()
-        })
         .map_err(|error| CheckSettingsUpdateError::Failed(error.to_string()))
-}
-
-pub(crate) fn app_update_component(
-    component: UpdateComponent,
-) -> Result<UpdateComponent, CommandError> {
-    match component {
-        UpdateComponent::App => Ok(component),
-        UpdateComponent::ModsPlugin => Err(super::toolkit::unsupported()),
-    }
 }
 
 impl From<UpdateActionError> for CommandError {
@@ -1170,48 +1023,6 @@ mod tests {
 
         let error = serialize_team_data(&export).expect_err("oversized export must fail");
         assert_eq!(error.code, "team_data_export_failed");
-    }
-
-    #[test]
-    fn poisoned_update_runtime_stops_workers_before_spawn_or_io() {
-        let state = AppState::default();
-        state.poison_update_runtime_for_test();
-        let initial_revision = state.settings_revision();
-
-        let check_started = Arc::new(AtomicBool::new(false));
-        let check_marker = Arc::clone(&check_started);
-        let check_result =
-            tauri::async_runtime::block_on(run_update_check_with(state.clone(), move || {
-                check_marker.store(true, Ordering::Release);
-                std::future::ready(Ok(Vec::new()))
-            }));
-
-        let download_started = Arc::new(AtomicBool::new(false));
-        let download_marker = Arc::clone(&download_started);
-        let download_result = tauri::async_runtime::block_on(run_update_download_with(
-            state.clone(),
-            UpdateComponent::App,
-            move |_, _| {
-                download_marker.store(true, Ordering::Release);
-                std::future::ready(Err(UpdateDownloadWorkerError::Failed))
-            },
-        ));
-
-        let install_started = Arc::new(AtomicBool::new(false));
-        let install_marker = Arc::clone(&install_started);
-        let install_result =
-            tauri::async_runtime::block_on(install_update_with(state.clone(), move |_, _| {
-                install_marker.store(true, Ordering::Release);
-                std::future::ready(Ok(()))
-            }));
-
-        assert_eq!(check_result, Err(UpdateActionError::RuntimeUnavailable));
-        assert_eq!(download_result, Err(UpdateActionError::RuntimeUnavailable));
-        assert_eq!(install_result, Err(UpdateActionError::RuntimeUnavailable));
-        assert!(!check_started.load(Ordering::Acquire));
-        assert!(!download_started.load(Ordering::Acquire));
-        assert!(!install_started.load(Ordering::Acquire));
-        assert_eq!(state.settings_revision(), initial_revision);
     }
 
     #[test]

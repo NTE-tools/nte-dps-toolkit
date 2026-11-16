@@ -183,6 +183,11 @@ function GlobalHotkeysCard({
                 variant="outline"
                 disabled={pending || !snapshot.hotkeys.enabled}
                 onClick={() => setRecording(action.id)}
+                onBlur={() =>
+                  setRecording((current) =>
+                    current === action.id ? null : current,
+                  )
+                }
                 onKeyDown={(event) => {
                   if (recording !== action.id) return;
                   event.preventDefault();
@@ -257,6 +262,7 @@ function PassthroughHotkeyCard({
             aria-label={t("Passthrough Hotkey")}
             disabled={pending}
             onClick={() => setRecording(true)}
+            onBlur={() => setRecording(false)}
             onKeyDown={(event) => {
               if (!recording) return;
               event.preventDefault();

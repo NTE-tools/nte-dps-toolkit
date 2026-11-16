@@ -38,6 +38,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { useCloseOnWindowBlur } from "@/hooks/use-close-on-window-blur";
 import {
   ContextMenu,
   ContextMenuItem,
@@ -92,10 +93,6 @@ export function HistoryPage() {
       history.state.status === "ready" ? history.state.snapshot.records : [],
     [history.state],
   );
-  const historyRevision =
-    history.state.status === "ready"
-      ? history.state.snapshot.revision
-      : "loading";
   useEffect(() => {
     setSelectedId((current) => selectHistoryRecord(records, current));
     setLeftId((current) => selectHistoryRecord(records, current) ?? "");
@@ -115,22 +112,24 @@ export function HistoryPage() {
     }
   }, [clearPreferredRecordId, preferredRecordId, records]);
 
+  const leftRecord = historyRecordById(records, leftId);
+  const rightRecord = historyRecordById(records, rightId);
+  const comparisonKey =
+    validHistoryComparisonPair(records, leftId, rightId) &&
+    leftRecord !== null &&
+    rightRecord !== null
+      ? `${leftRecord.id}:${leftRecord.recordedAt}:${rightRecord.id}:${rightRecord.recordedAt}`
+      : null;
+
   useEffect(() => {
-    if (!validHistoryComparisonPair(records, leftId, rightId)) {
+    if (comparisonKey === null) {
       clearComparison();
       return;
     }
     void compare(leftId, rightId);
-  }, [clearComparison, compare, historyRevision, leftId, records, rightId]);
+  }, [clearComparison, compare, comparisonKey, leftId, rightId]);
 
-  useEffect(() => {
-    if (contextMenu === null) return;
-    const closeContextMenuOnWindowBlur = () => setContextMenu(null);
-    window.addEventListener("blur", closeContextMenuOnWindowBlur);
-    return () => {
-      window.removeEventListener("blur", closeContextMenuOnWindowBlur);
-    };
-  }, [contextMenu]);
+  useCloseOnWindowBlur(contextMenu !== null, () => setContextMenu(null));
 
   const selected = historyRecordById(records, selectedId);
   const busy = history.pendingAction !== null;
@@ -333,7 +332,7 @@ export function HistoryPage() {
               <PageScrollArea>
                 <div className="grid grid-cols-1 items-start gap-4 min-[1000px]:grid-cols-[260px_minmax(0,1fr)]">
                   <div
-                    className="flex min-w-0 gap-2 overflow-x-auto rounded-lg border bg-background p-2 min-[1000px]:sticky min-[1000px]:top-0 min-[1000px]:block min-[1000px]:max-h-[calc(100vh-7rem)] min-[1000px]:overflow-y-auto"
+                    className="flex min-w-0 gap-2 overflow-x-auto rounded-xl border bg-card p-2 min-[1000px]:sticky min-[1000px]:top-0 min-[1000px]:block min-[1000px]:max-h-[calc(100vh-7rem)] min-[1000px]:overflow-y-auto"
                     role="listbox"
                     aria-label={t("History records")}
                     onKeyDown={(event) => {

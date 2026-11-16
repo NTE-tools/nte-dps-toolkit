@@ -1,10 +1,10 @@
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import {
   PageHeader,
   PageTitle,
   PageDescription,
 } from "@/components/nte/page-layout";
 import {
-  Activity,
   Check,
   CircleCheck,
   Clipboard,
@@ -12,23 +12,17 @@ import {
   FileJson,
   FileSearch,
   Gauge,
+  type LucideIcon,
   Network,
   RefreshCw,
   Save,
   ShieldAlert,
   TriangleAlert,
   Upload,
-  X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useState, type ReactNode } from "react";
 
-import {
-  Alert,
-  AlertAction,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,7 +33,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
-import { t, tf } from "@/lib/i18n";
+import { t, tf, useFrontendLanguage } from "@/lib/i18n";
 import type { DiagnosticsCheckSnapshot } from "@/lib/tauri/generated/DiagnosticsCheckSnapshot";
 import type { DiagnosticsQualitySnapshot } from "@/lib/tauri/generated/DiagnosticsQualitySnapshot";
 import type { DiagnosticsSnapshot } from "@/lib/tauri/generated/DiagnosticsSnapshot";
@@ -90,20 +84,10 @@ export function DiagnosticsPage() {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
     "idle",
   );
+  useFrontendLanguage();
   const snapshot = state.status === "ready" ? state.snapshot : null;
   const contentKind = diagnosticsContentKind(state.status);
   const notice = actionError ?? streamError;
-  const reportText = useMemo(
-    () =>
-      snapshot
-        ? buildRedactedDiagnosticsReport(
-            snapshot,
-            translateDiagnosticToken,
-            (key, arguments_) => tf(key, arguments_),
-          )
-        : "",
-    [snapshot],
-  );
 
   useEffect(() => {
     if (copyState === "idle") return;
@@ -112,6 +96,12 @@ export function DiagnosticsPage() {
   }, [copyState]);
 
   async function copyReport() {
+    if (!snapshot) return;
+    const reportText = buildRedactedDiagnosticsReport(
+      snapshot,
+      translateDiagnosticToken,
+      (key, arguments_) => tf(key, arguments_),
+    );
     try {
       await navigator.clipboard.writeText(reportText);
       setCopyState("copied");
@@ -284,17 +274,20 @@ function EnvironmentSection({ snapshot }: { snapshot: DiagnosticsSnapshot }) {
     },
   ];
   return (
-    <section aria-labelledby="diagnostics-environment">
+    <section
+      className="diagnostics-card"
+      aria-labelledby="diagnostics-environment"
+    >
       <SectionHeading
         icon={Network}
         id="diagnostics-environment"
         title="Capture Environment"
         description="The active adapter, connection and capture pipeline"
       />
-      <dl className="grid border-y bg-card/25 min-[760px]:grid-cols-2 min-[1240px]:grid-cols-5">
+      <dl className="grid border-t bg-card/25 min-[760px]:grid-cols-2 min-[1240px]:grid-cols-5">
         {rows.map((row) => (
           <div
-            className="min-w-0 border-b px-4 py-3 min-[760px]:border-r min-[1240px]:border-b-0"
+            className="min-w-0 border-b px-4 py-3 last:border-b-0 min-[760px]:border-r min-[760px]:last:border-r-0 min-[1240px]:border-b-0"
             key={row.label}
           >
             <dt className="text-xs text-muted-foreground">{t(row.label)}</dt>
@@ -355,7 +348,7 @@ function FileActions({
     },
   ];
   return (
-    <section className="border-b px-4 py-3">
+    <section className="diagnostics-card px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
         {actions.map(({ action, label, icon: Icon, enabled }) => (
           <Button
@@ -385,7 +378,7 @@ function FileActions({
 function ReportSection({ snapshot }: { snapshot: DiagnosticsSnapshot }) {
   const report = snapshot.report;
   return (
-    <section aria-labelledby="diagnostics-report">
+    <section className="diagnostics-card" aria-labelledby="diagnostics-report">
       <SectionHeading
         icon={ShieldAlert}
         id="diagnostics-report"
@@ -517,7 +510,10 @@ function QualitySection({ quality }: { quality: DiagnosticsQualitySnapshot }) {
     ],
   ] as const;
   return (
-    <section aria-labelledby="diagnostics-quality" className="pb-8">
+    <section
+      aria-labelledby="diagnostics-quality"
+      className="diagnostics-card pb-8"
+    >
       <SectionHeading
         icon={Gauge}
         id="diagnostics-quality"
@@ -563,7 +559,7 @@ function SectionHeading({
   description,
   children,
 }: {
-  icon: typeof Activity;
+  icon: LucideIcon;
   id: string;
   title: string;
   description: string;
@@ -647,29 +643,12 @@ function DiagnosticsNotice({
   error: CommandError;
   onDismiss: () => void;
 }) {
-  return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-14 z-[90] flex justify-center px-4">
-      <Alert
-        variant="destructive"
-        className="pointer-events-auto w-full max-w-xl shadow-xl"
-      >
-        <Activity className="size-4" aria-hidden="true" />
-        <AlertTitle>{t("Diagnostics operation failed")}</AlertTitle>
-        <AlertDescription>
-          {tf(error.messageKey, error.messageArguments)}
-        </AlertDescription>
-        <AlertAction>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            aria-label={t("Dismiss")}
-            onClick={onDismiss}
-          >
-            <X aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
-    </div>,
-    document.body,
+  return (
+    <FloatingActionNotice
+      status="error"
+      message={t("Diagnostics operation failed")}
+      detail={tf(error.messageKey, error.messageArguments)}
+      onDismiss={onDismiss}
+    />
   );
 }

@@ -56,7 +56,7 @@ export function ModMarketPanel({
     : "Search feature plugins";
 
   return (
-    <section className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden border bg-card">
+    <section className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card">
       <div
         className="flex flex-wrap gap-2 border-b px-4 py-3"
         role="group"

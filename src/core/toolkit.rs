@@ -20,6 +20,162 @@ use std::{
 
 pub use crate::storage::config::DataMode;
 
+/// Wire command IDs shared by the UE Tools host, Combat plugin, and User plugin.
+pub mod command_id {
+    pub const HOST_STATUS: u32 = 2;
+    pub const PLUGIN_LIST: u32 = 3;
+    pub const PLUGIN_ENABLE: u32 = 4;
+    pub const PLUGIN_DISABLE: u32 = 5;
+    pub const OPERATION_STATUS: u32 = 7;
+    pub const HOST_SHUTDOWN: u32 = 11;
+    pub const COMBAT_STATUS: u32 = 100;
+    pub const USER_CHARACTERS_REFRESH: u32 = 301;
+    pub const USER_CHARACTERS_STATUS: u32 = 302;
+    pub const USER_CHARACTERS_BLOB: u32 = 303;
+}
+
+pub const MAX_LOADER_RECEIPT_BYTES: usize = 64 * 1024;
+
+pub fn valid_plugin_file(file: &str) -> bool {
+    file.len() <= 128
+        && file.ends_with(".dll")
+        && file
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+        && !file.contains("..")
+}
+
+pub fn validate_combat_status(combat: &CombatStatus) -> Result<(), ToolkitError> {
+    if combat.encounter_id.len() > 256
+        || [
+            combat.total_damage,
+            combat.quality.direct,
+            combat.quality.correlated,
+            combat.quality.inferred,
+            combat.quality.unknown,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+    {
+        return Err(ToolkitError::InvalidProtocol);
+    }
+    Ok(())
+}
+
+pub fn read_loader_receipt(mut output: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    output
+        .by_ref()
+        .take(MAX_LOADER_RECEIPT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    std::io::copy(&mut output, &mut std::io::sink())?;
+    Ok(bytes)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoaderReceiptFailure {
+    pub code: &'static str,
+    pub phase: &'static str,
+    pub reason: &'static str,
+    pub exit: String,
+    pub win32: String,
+    pub cleanup: String,
+}
+
+pub fn classify_loader_receipt(bytes: &[u8], exit: Option<i32>) -> LoaderReceiptFailure {
+    let receipt = (bytes.len() <= MAX_LOADER_RECEIPT_BYTES)
+        .then(|| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .flatten();
+    let receipt = receipt.filter(|r| r["schemaVersion"] == 1 && r["ok"] == false);
+    let mut phase = "unknown";
+    let mut reason = "unclassified";
+    let mut win32 = "unknown".to_owned();
+    let mut cleanup = "unknown".to_owned();
+    if let Some(r) = receipt {
+        phase = match r["phase"].as_str() {
+            Some("arguments") => "arguments",
+            Some("elevation") => "elevation",
+            Some("driver_inspect") => "driver_inspect",
+            Some("target") => "target",
+            Some("host_check") => "host_check",
+            Some("driver_start") => "driver_start",
+            Some("load") => "load",
+            Some("connect") => "connect",
+            Some("driver_stop") => "driver_stop",
+            _ => "unknown",
+        };
+        // Exact allowlist of path-free errors from the current native Loader.
+        // Unknown text remains private; a future Loader cannot inject paths here.
+        reason = match r["error"].as_str() {
+            Some("expected exactly one HTGame.exe; start the game or select --pid explicitly") => {
+                "target_not_unique"
+            }
+            Some("target is not HTGame.exe") => "target_wrong_image",
+            Some("target must be native Windows x64") => "target_wrong_architecture",
+            Some(
+                "target process has exited"
+                | "target process exited"
+                | "target exited before Toolkit IPC ready",
+            ) => "target_exited",
+            Some(
+                "host must resolve to d3d12.dll, not a plugin"
+                | "plugin image is not a host; only the host may load plugins",
+            ) => "host_wrong_image",
+            Some("driver lacks the required memory protocol marker") => "driver_protocol_mismatch",
+            Some(
+                "UETools has an orphan service/channel; normal SCM unload is unavailable; no forced unload",
+            ) => "driver_orphan_channel",
+            Some(
+                "previous driver lifecycle was abandoned; cleanup only, do not reinject automatically",
+            ) => "driver_abandoned_lifecycle",
+            Some("D3D12 device creation failed; cannot install the reflective trigger") => {
+                "d3d12_device_failed"
+            }
+            Some("D3D12 command queue creation failed") => "d3d12_queue_failed",
+            Some("DXGI factory creation failed") => "dxgi_factory_failed",
+            Some("DXGI swapchain creation failed; cannot install the reflective trigger") => {
+                "dxgi_swapchain_failed"
+            }
+            Some("host library load returned null (DllMain or path failure)") => {
+                "host_library_load_failed"
+            }
+            Some("Toolkit heartbeat stale") => "ipc_heartbeat_stale",
+            Some("Toolkit response identity mismatch") => "ipc_identity_mismatch",
+            Some("Toolkit Describe returned failure") => "ipc_describe_failed",
+            _ => "unclassified",
+        };
+        let number = |v: &serde_json::Value| {
+            v.as_u64()
+                .filter(|n| *n <= u32::MAX as u64)
+                .map(|n| n.to_string())
+        };
+        win32 = number(&r["win32"]).unwrap_or_else(|| "unknown".into());
+        cleanup = if r["driver"]["stopped"] == true {
+            "stopped".into()
+        } else {
+            number(&r["driver"]["cleanupWin32"]).unwrap_or_else(|| "unconfirmed".into())
+        };
+    }
+    let code = match phase {
+        "elevation" => "plugin_loader_elevation_failed",
+        "driver_inspect" | "driver_start" | "driver_stop" => "plugin_loader_driver_failed",
+        "target" => "plugin_loader_target_failed",
+        "host_check" => "plugin_loader_host_invalid",
+        "load" => "plugin_loader_load_failed",
+        "connect" => "plugin_loader_handshake_failed",
+        _ => "plugin_loader_result_invalid",
+    };
+    LoaderReceiptFailure {
+        code,
+        phase,
+        reason,
+        exit: exit.map_or("unknown".into(), |n| n.to_string()),
+        win32,
+        cleanup,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CombatStatus {

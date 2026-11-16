@@ -3,12 +3,11 @@ use ts_rs::TS;
 
 use nte_dps_tool::{
     core::empty_curtain::substat_unlock_level,
+    core::equipment_runtime::EmptyCurtainOperationState,
     core::snapshot::{InventoryItem, InventorySnapshot, InventoryStat, ItemUid},
     engine::parser::EquipmentCatalog,
     storage::i18n::{self, Language},
 };
-
-use crate::equipment_operation_service::EmptyCurtainOperationState;
 
 pub(crate) const EMPTY_CURTAIN_MAX_CHARACTERS: usize = 64;
 pub(crate) const EMPTY_CURTAIN_MAX_ITEMS: usize = 4_096;
@@ -467,7 +466,7 @@ mod tests {
         },
     };
 
-    use crate::contract::stream::MAX_STREAM_DELIVERY_BYTES;
+    use crate::contract::stream::tests::MAX_STREAM_DELIVERY_BYTES;
 
     fn adversarial_item(index: u32, text: &str) -> InventoryItem {
         let stat = InventoryStat {

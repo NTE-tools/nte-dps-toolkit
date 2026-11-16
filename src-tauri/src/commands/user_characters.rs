@@ -2,7 +2,7 @@ use super::toolkit;
 use crate::{contract::CommandError, state::AppState, windows::console};
 use nte_dps_tool::{
     core::{
-        toolkit::DataMode,
+        toolkit::{DataMode, command_id},
         user_characters::{self, CharacterPage, SnapshotError},
     },
     platform::toolkit::ToolkitError,
@@ -142,16 +142,22 @@ pub(crate) async fn get_user_characters(
         {
             return Err(CommandError::from(SnapshotError::SessionChanged));
         }
-        if ![302, 303].iter().all(|c| capabilities.contains(c))
-            || (request.refresh && !capabilities.contains(&301))
+        if ![
+            command_id::USER_CHARACTERS_STATUS,
+            command_id::USER_CHARACTERS_BLOB,
+        ]
+        .iter()
+        .all(|c| capabilities.contains(c))
+            || (request.refresh && !capabilities.contains(&command_id::USER_CHARACTERS_REFRESH))
         {
             return Err(toolkit::unsupported());
         }
-        let prior: NativeStatus = client.json(302, 0, "", &|| false)?;
+        let prior: NativeStatus =
+            client.json(command_id::USER_CHARACTERS_STATUS, 0, "", &|| false)?;
         validate_status(&prior, &identity)?;
         let status: NativeStatus = if request.refresh {
             client.json(
-                301,
+                command_id::USER_CHARACTERS_REFRESH,
                 u32::from(prior.character_refresh_supported),
                 "",
                 &|| false,
@@ -177,7 +183,7 @@ pub(crate) async fn get_user_characters(
             }
             // Read the complete paged Toolkit blob, NOT release_action's 8 KiB preview.
             // Pass native snapshot identity to reject concurrent refresh/invalidation.
-            let bytes = client.call(303, 0, id, &|| false)?;
+            let bytes = client.call(command_id::USER_CHARACTERS_BLOB, 0, id, &|| false)?;
             let page = user_characters::project(
                 &bytes,
                 &identity,
@@ -186,7 +192,8 @@ pub(crate) async fn get_user_characters(
                 request.selected_uid.as_deref(),
                 &request.query,
             )?;
-            let after: NativeStatus = client.json(302, 0, "", &|| false)?;
+            let after: NativeStatus =
+                client.json(command_id::USER_CHARACTERS_STATUS, 0, "", &|| false)?;
             validate_status(&after, &identity)?;
             if after.dirty
                 || after.state != CharacterReadState::Completed

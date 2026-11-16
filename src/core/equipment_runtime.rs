@@ -6,13 +6,56 @@ use super::{
 };
 use crate::{
     engine::{model::HtItemNetId, parser::EquipmentCatalog},
-    platform::{
-        mods_plugin::ModsPluginOperation,
-        toolkit::{ToolkitClient, ToolkitError},
-    },
+    platform::toolkit::{ToolkitClient, ToolkitError},
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EquipmentPlacement {
+    pub equipment: HtItemNetId,
+    pub row: i32,
+    pub column: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EquipmentOperation {
+    EquipModule {
+        equipment: HtItemNetId,
+        row: i32,
+        column: i32,
+    },
+    EquipCore {
+        equipment: HtItemNetId,
+    },
+    UnequipModule {
+        equipment: HtItemNetId,
+    },
+    UnequipCore {
+        equipment: HtItemNetId,
+    },
+    UnequipAll,
+    EquipOneKey {
+        placements: Vec<EquipmentPlacement>,
+        core: HtItemNetId,
+    },
+    MoveModuleToCharacter {
+        equipment: HtItemNetId,
+        row: i32,
+        column: i32,
+    },
+    MoveCoreToCharacter {
+        equipment: HtItemNetId,
+    },
+    SetItemDiscarded {
+        equipment: HtItemNetId,
+        discarded: bool,
+    },
+    SetItemLocked {
+        equipment: HtItemNetId,
+        locked: bool,
+    },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -38,7 +81,7 @@ struct Confirmation {
     provider: String,
     domain: String,
     character: HtItemNetId,
-    operation: ModsPluginOperation,
+    operation: EquipmentOperation,
     deadline: std::time::Instant,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,7 +267,7 @@ impl Store {
         identity: String,
         before: &Inventory,
         character: HtItemNetId,
-        operation: ModsPluginOperation,
+        operation: EquipmentOperation,
     ) -> Result<(), Error> {
         let mut s = self.state.lock().map_err(|_| ToolkitError::Failed)?;
         if s.confirmation.is_some() {
@@ -387,8 +430,8 @@ fn collect_once(client: &mut Client, catalog: &EquipmentCatalog) -> Result<Inven
 fn id(v: HtItemNetId) -> Value {
     json!({"solt":v.solt,"serial":v.serial})
 }
-pub fn command(character: HtItemNetId, op: &ModsPluginOperation) -> (&'static str, Value) {
-    use ModsPluginOperation::*;
+pub fn command(character: HtItemNetId, op: &EquipmentOperation) -> (&'static str, Value) {
+    use EquipmentOperation::*;
     let mut p = json!({"character":id(character)});
     let method = match op {
         SetItemLocked { equipment, locked } => {
@@ -451,8 +494,8 @@ pub fn command(character: HtItemNetId, op: &ModsPluginOperation) -> (&'static st
     };
     (method, p)
 }
-pub fn confirmed(data: &Inventory, character: HtItemNetId, op: &ModsPluginOperation) -> bool {
-    use ModsPluginOperation::*;
+pub fn confirmed(data: &Inventory, character: HtItemNetId, op: &EquipmentOperation) -> bool {
+    use EquipmentOperation::*;
     let item = |id| data.items.iter().find(|i| i.id == id);
     let equipped = |id| item(id).is_some_and(|i| i.character_net_id == Some(character));
     let placed = |id, row, column| {
@@ -505,7 +548,7 @@ pub fn confirmed(data: &Inventory, character: HtItemNetId, op: &ModsPluginOperat
 fn confirm_readback(
     before: &Inventory,
     character: HtItemNetId,
-    op: &ModsPluginOperation,
+    op: &EquipmentOperation,
     readback: Result<Inventory, Error>,
 ) -> Result<Inventory, Error> {
     let after = readback.map_err(confirmation_error)?;
@@ -521,11 +564,11 @@ pub fn execute(
     client: &mut Client,
     before: &Inventory,
     character: HtItemNetId,
-    op: &ModsPluginOperation,
+    op: &EquipmentOperation,
     catalog: &EquipmentCatalog,
 ) -> Result<Inventory, Error> {
-    if let ModsPluginOperation::SetItemLocked { equipment, .. }
-    | ModsPluginOperation::SetItemDiscarded { equipment, .. } = op
+    if let EquipmentOperation::SetItemLocked { equipment, .. }
+    | EquipmentOperation::SetItemDiscarded { equipment, .. } = op
     {
         let observed = inspect(client, before, *equipment)?;
         let mut after = before.clone();
@@ -565,23 +608,23 @@ pub fn execute(
     // concrete item identities and owners before sending the native operation.
     let current = before;
     let selected = match op {
-        ModsPluginOperation::EquipOneKey { placements, core } => placements
+        EquipmentOperation::EquipOneKey { placements, core } => placements
             .iter()
             .map(|p| p.equipment)
             .chain(std::iter::once(*core))
             .collect::<Vec<_>>(),
-        ModsPluginOperation::UnequipAll => before
+        EquipmentOperation::UnequipAll => before
             .items
             .iter()
             .filter(|i| i.character_net_id == Some(character))
             .map(|i| i.id)
             .collect(),
-        ModsPluginOperation::EquipModule { equipment, .. }
-        | ModsPluginOperation::MoveModuleToCharacter { equipment, .. }
-        | ModsPluginOperation::EquipCore { equipment }
-        | ModsPluginOperation::MoveCoreToCharacter { equipment }
-        | ModsPluginOperation::UnequipModule { equipment }
-        | ModsPluginOperation::UnequipCore { equipment } => vec![*equipment],
+        EquipmentOperation::EquipModule { equipment, .. }
+        | EquipmentOperation::MoveModuleToCharacter { equipment, .. }
+        | EquipmentOperation::EquipCore { equipment }
+        | EquipmentOperation::MoveCoreToCharacter { equipment }
+        | EquipmentOperation::UnequipModule { equipment }
+        | EquipmentOperation::UnequipCore { equipment } => vec![*equipment],
         _ => vec![],
     };
     for selected in selected {
@@ -638,15 +681,131 @@ pub fn connect(router: &Router, host: &ToolkitClient, pid: u32) -> Result<Client
     router.connect(host, pid).map_err(Into::into)
 }
 
+pub const EQUIPMENT_IDLE_MESSAGE_KEY: &str = "No equipment operation is pending";
+pub const EQUIPMENT_SENDING_MESSAGE_KEY: &str = "Sending equipment request...";
+pub const EQUIPMENT_CONFIRMING_MESSAGE_KEY: &str =
+    "Equipment operation is awaiting confirmation. Synchronizing inventory; do not repeat it.";
+pub const EQUIPMENT_CONFIRMED_MESSAGE_KEY: &str =
+    "Equipment change confirmed by refreshed inventory.";
+pub const EQUIPMENT_CONFIRMATION_TIMEOUT_MESSAGE_KEY: &str = "Equipment request was sent, but its result could not be confirmed. Check the game before retrying.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmptyCurtainOperationState {
+    pub status: &'static str,
+    pub message_key: &'static str,
+    pub message_arguments: Vec<String>,
+}
+
+impl Default for EmptyCurtainOperationState {
+    fn default() -> Self {
+        Self {
+            status: "idle",
+            message_key: EQUIPMENT_IDLE_MESSAGE_KEY,
+            message_arguments: vec![],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EquipmentOperationSnapshot {
+    pub operation: EmptyCurtainOperationState,
+    pub revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EquipmentOperationError {
+    Unavailable,
+}
+
+#[derive(Default)]
+pub struct EquipmentOperationService {
+    pub inventory: Store,
+    operation: Mutex<(EmptyCurtainOperationState, u64)>,
+}
+
+impl EquipmentOperationService {
+    pub fn set(
+        &self,
+        status: &'static str,
+        key: &'static str,
+    ) -> Result<(), EquipmentOperationError> {
+        let mut s = self
+            .operation
+            .lock()
+            .map_err(|_| EquipmentOperationError::Unavailable)?;
+        let next = EmptyCurtainOperationState {
+            status,
+            message_key: key,
+            message_arguments: vec![],
+        };
+        if s.0 != next {
+            s.0 = next;
+            s.1 = s.1.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn poll_snapshot(&self) -> Result<EquipmentOperationSnapshot, EquipmentOperationError> {
+        let s = self
+            .operation
+            .lock()
+            .map_err(|_| EquipmentOperationError::Unavailable)?;
+        Ok(EquipmentOperationSnapshot {
+            operation: s.0.clone(),
+            revision: s.1,
+        })
+    }
+
+    pub fn settle_confirmation(
+        &self,
+        identity: &str,
+        data: Option<&Inventory>,
+    ) -> Result<bool, Error> {
+        let outcome = self.inventory.settle_confirmation(identity, data)?;
+        let updated = match outcome {
+            Some(ConfirmationState::Waiting) => {
+                self.set("pending", EQUIPMENT_CONFIRMING_MESSAGE_KEY)
+            }
+            Some(ConfirmationState::Confirmed) => {
+                self.set("success", EQUIPMENT_CONFIRMED_MESSAGE_KEY)
+            }
+            Some(ConfirmationState::Expired | ConfirmationState::SourceChanged) => {
+                self.set("error", EQUIPMENT_CONFIRMATION_TIMEOUT_MESSAGE_KEY)
+            }
+            None => return Ok(false),
+        };
+        updated.map_err(|_| Error::Transport(ToolkitError::Unavailable))?;
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        engine::model::{EmptyCurtainCharacter, EmptyCurtainItem, EmptyCurtainPlacement},
-        platform::mods_plugin::ModsPluginPlacement,
-    };
+    use crate::engine::model::{EmptyCurtainCharacter, EmptyCurtainItem, EmptyCurtainPlacement};
     fn uid(n: u32) -> HtItemNetId {
         HtItemNetId { solt: n, serial: 1 }
+    }
+
+    #[test]
+    fn idle_does_not_claim_legacy_failure_and_noop_keeps_revision() {
+        let service = EquipmentOperationService::default();
+        assert_eq!(service.poll_snapshot().unwrap().operation.status, "idle");
+        service
+            .set("pending", EQUIPMENT_SENDING_MESSAGE_KEY)
+            .unwrap();
+        let before = service.poll_snapshot().unwrap();
+        service
+            .set("pending", EQUIPMENT_SENDING_MESSAGE_KEY)
+            .unwrap();
+        assert_eq!(before, service.poll_snapshot().unwrap());
+        service
+            .set("success", EQUIPMENT_CONFIRMED_MESSAGE_KEY)
+            .unwrap();
+        assert_eq!(
+            service.poll_snapshot().unwrap().revision,
+            before.revision + 1
+        );
     }
     fn inventory() -> Inventory {
         let item = |n, placement| EmptyCurtainItem {
@@ -678,7 +837,7 @@ mod tests {
     }
     #[test]
     fn all_ten_legacy_equipment_actions_map_to_native_requests_and_require_readback() {
-        use ModsPluginOperation::*;
+        use EquipmentOperation::*;
         let ops = vec![
             (
                 EquipModule {
@@ -721,7 +880,7 @@ mod tests {
             (UnequipAll, "equipment.unequip_all", false),
             (
                 EquipOneKey {
-                    placements: vec![ModsPluginPlacement {
+                    placements: vec![EquipmentPlacement {
                         equipment: uid(1),
                         row: 2,
                         column: 3,
@@ -808,14 +967,14 @@ mod tests {
     fn post_dispatch_read_errors_are_pending_not_failed_operations() {
         let before = inventory();
         for op in [
-            ModsPluginOperation::UnequipAll,
-            ModsPluginOperation::EquipModule {
+            EquipmentOperation::UnequipAll,
+            EquipmentOperation::EquipModule {
                 equipment: uid(1),
                 row: 2,
                 column: 3,
             },
-            ModsPluginOperation::EquipOneKey {
-                placements: vec![ModsPluginPlacement {
+            EquipmentOperation::EquipOneKey {
+                placements: vec![EquipmentPlacement {
                     equipment: uid(1),
                     row: 2,
                     column: 3,
@@ -847,13 +1006,13 @@ mod tests {
             row.equipped_placement = None;
         }
         assert!(
-            confirm_readback(&before, uid(3), &ModsPluginOperation::UnequipAll, Ok(after)).is_ok()
+            confirm_readback(&before, uid(3), &EquipmentOperation::UnequipAll, Ok(after)).is_ok()
         );
         assert_eq!(
             confirm_readback(
                 &before,
                 uid(3),
-                &ModsPluginOperation::UnequipAll,
+                &EquipmentOperation::UnequipAll,
                 Ok(before.clone())
             ),
             Err(Error::Unconfirmed)
@@ -868,7 +1027,7 @@ mod tests {
                 "host".into(),
                 &before,
                 uid(3),
-                ModsPluginOperation::UnequipAll,
+                EquipmentOperation::UnequipAll,
             )
             .unwrap();
         assert!(
@@ -877,7 +1036,7 @@ mod tests {
                     "host".into(),
                     &before,
                     uid(3),
-                    ModsPluginOperation::UnequipAll
+                    EquipmentOperation::UnequipAll
                 )
                 .is_err()
         );
@@ -903,7 +1062,7 @@ mod tests {
                 "host".into(),
                 &before,
                 uid(3),
-                ModsPluginOperation::UnequipAll,
+                EquipmentOperation::UnequipAll,
             )
             .unwrap();
         assert_eq!(
@@ -917,7 +1076,7 @@ mod tests {
                 "host".into(),
                 &before,
                 uid(3),
-                ModsPluginOperation::UnequipAll,
+                EquipmentOperation::UnequipAll,
             )
             .unwrap();
         store

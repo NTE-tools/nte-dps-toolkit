@@ -7,7 +7,6 @@ use super::capture::{
     AutoDeviceResolution, enumerate_devices, probe_auto_device, resolve_manual_device,
 };
 use crate::engine::capture::CaptureDevice;
-use crate::engine::model::{CaptureQualitySource, CaptureQualitySummary, CombatState};
 use crate::platform::network::{
     GameNetwork, GameNetworkProbe, GameNetworkUnavailable, NetworkProbeFailure,
 };
@@ -124,37 +123,6 @@ pub struct DiagnosticSnapshot {
     pub server_damage_calibration: bool,
     pub last_diagnostic: Option<String>,
     pub manual_capture_device: Option<String>,
-}
-
-/// Lightweight hand-off for the diagnostics service. Hit attribution is now
-/// maintained incrementally inside `CombatState`; preparing this value never
-/// walks or clones the authoritative, unbounded hit log.
-#[derive(Debug, Default)]
-pub(crate) struct DiagnosticQualityCache;
-
-#[derive(Debug)]
-pub(crate) struct DiagnosticQualityInput {
-    summary: CaptureQualitySummary,
-}
-
-impl DiagnosticQualityCache {
-    /// Reads only scalar and bounded-index fields while the authoritative state
-    /// is borrowed. `session_generation` remains part of the call contract so
-    /// callers cannot accidentally reintroduce cross-session cache reuse.
-    pub(crate) fn prepare(
-        &self,
-        state: &CombatState,
-        source: CaptureQualitySource,
-        _session_generation: u64,
-    ) -> DiagnosticQualityInput {
-        DiagnosticQualityInput {
-            summary: state.capture_quality_summary(source),
-        }
-    }
-
-    pub(crate) fn finish(&mut self, input: DiagnosticQualityInput) -> CaptureQualitySummary {
-        input.summary
-    }
 }
 
 pub fn run_capture_diagnostics(snapshot: DiagnosticSnapshot) -> DiagnosticRun {
@@ -561,55 +529,7 @@ fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::model::{Hit, HitCharacterSource, HitDirection, PacketObservation};
     use crate::platform::network::NetworkProbeErrorCode;
-
-    fn quality_hit(
-        timestamp: f64,
-        char_id: u32,
-        direction: HitDirection,
-        char_known: bool,
-        damage: f64,
-    ) -> Hit {
-        Hit {
-            timestamp,
-            char_id,
-            char_name: format!("Character {char_id}"),
-            char_known,
-            damage,
-            byte_offset: timestamp as usize,
-            bit_shift: 0,
-            char_source: HitCharacterSource::Packet,
-            direction,
-            target_hp_before: 0.0,
-            target_hp_after: 0.0,
-            target_max_hp: 0.0,
-            max_hp_reduction: 0.0,
-            target_hp_percent: 0.0,
-            target_id: None,
-            target_name: None,
-            target_name_en: None,
-            target_name_ja: None,
-            target_monster_id: None,
-            target_context: Vec::new(),
-            gameplay_effect_index: None,
-            gameplay_effect_name: None,
-            ability_name: None,
-            damage_name: None,
-            damage_component: None,
-            attack_type: None,
-            damage_attribute: None,
-            follow_up_damage: 0.0,
-            follow_up_timestamp: None,
-            follow_up_damage_name: None,
-            follow_up_attack_type: None,
-            follow_up_damage_attribute: None,
-            reconciled_overkill_damage: None,
-            exact: None,
-            plugin_snapshot: None,
-            wire_event: None,
-        }
-    }
 
     #[test]
     fn runtime_checks_use_stable_keys_and_order_failures_before_warnings() {
@@ -711,56 +631,5 @@ mod tests {
         let (_, manual_failure) =
             diagnostic_game_probe(GameNetworkProbe::ProbeFailed(failure), true);
         assert_eq!(manual_failure.status, DiagnosticStatus::Warning);
-    }
-
-    #[test]
-    fn diagnostics_quality_handoff_matches_incremental_engine_summary() {
-        let source = CaptureQualitySource::PcapngReplay;
-        let mut state = CombatState::default();
-        let mut first = quality_hit(1.0, 7, HitDirection::Unknown, false, 100.0);
-        first.attack_type = Some("raw category".to_owned());
-        first.gameplay_effect_index = Some(11);
-        state.push_hit(first);
-        state.observe_packet(PacketObservation { parsed_hits: 1 });
-
-        let mut cache = DiagnosticQualityCache;
-        let initial_input = cache.prepare(&state, source, 1);
-        assert_eq!(
-            cache.finish(initial_input),
-            state.capture_quality_summary(source)
-        );
-
-        state.observe_packet(PacketObservation { parsed_hits: 0 });
-        let packet_input = cache.prepare(&state, source, 1);
-        assert_eq!(
-            cache.finish(packet_input),
-            state.capture_quality_summary(source),
-            "packet-only counters must change without rebuilding hit attribution"
-        );
-
-        let mut second = quality_hit(2.0, 7, HitDirection::Outgoing, false, 50.0);
-        second.attack_type = Some("raw category".to_owned());
-        second.gameplay_effect_index = Some(11);
-        state.push_hit(second);
-        state.push_hit(quality_hit(3.0, 9, HitDirection::Incoming, false, 25.0));
-        let mut mapped = quality_hit(4.0, 10, HitDirection::Outgoing, true, 75.0);
-        mapped.ability_name = Some("mapped ability".to_owned());
-        mapped.gameplay_effect_index = Some(12);
-        state.push_hit(mapped);
-
-        let append_input = cache.prepare(&state, source, 1);
-        assert_eq!(
-            cache.finish(append_input),
-            state.capture_quality_summary(source),
-            "incremental unknown counters must preserve the established quality contract"
-        );
-
-        let replacement = CombatState::default();
-        let replacement_input = cache.prepare(&replacement, source, 2);
-        assert_eq!(
-            cache.finish(replacement_input),
-            replacement.capture_quality_summary(source),
-            "session generation must prevent reuse across replacement state"
-        );
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -35,15 +35,8 @@ impl CharacterDataService {
     }
 
     pub(crate) fn snapshot(&self) -> Result<CharacterDataProjection, CharacterDataServiceError> {
-        self.snapshot_with(load_character_data)
-    }
-
-    fn snapshot_with(
-        &self,
-        load: impl FnOnce(&Path) -> Result<CharacterDataProjection, CharacterDataError>,
-    ) -> Result<CharacterDataProjection, CharacterDataServiceError> {
         let _permit = self.reserve()?;
-        load(&self.path).map_err(CharacterDataServiceError::Domain)
+        load_character_data(&self.path).map_err(CharacterDataServiceError::Domain)
     }
 
     fn reserve(&self) -> Result<CharacterDataPermit<'_>, CharacterDataServiceError> {
@@ -59,20 +52,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn concurrent_operation_fails_fast_without_locking_file_work() {
+    fn concurrent_operation_fails_fast_while_busy() {
         let service = CharacterDataService::new(PathBuf::from("private-character-path.json"));
-        let projection = service
-            .snapshot_with(|_| {
-                assert!(service.busy.load(Ordering::Acquire));
-                assert_eq!(
-                    service.snapshot_with(|_| Ok(CharacterDataProjection::default())),
-                    Err(CharacterDataServiceError::Busy)
-                );
-                Ok(CharacterDataProjection::default())
-            })
-            .expect("load projection");
-
-        assert!(projection.records.is_empty());
+        let permit = service.reserve().expect("reserve character data slot");
+        assert!(service.busy.load(Ordering::Acquire));
+        assert_eq!(service.snapshot(), Err(CharacterDataServiceError::Busy));
+        drop(permit);
         assert!(!service.busy.load(Ordering::Acquire));
     }
 }

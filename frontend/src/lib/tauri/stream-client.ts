@@ -4,7 +4,7 @@ import { toCommandError, type CommandError } from "@/lib/tauri/command-error";
 import type { StreamKind } from "@/lib/tauri/generated/StreamKind";
 import type { SubscriptionReceipt } from "@/lib/tauri/generated/SubscriptionReceipt";
 
-export interface StreamOptions<Event> {
+interface StreamOptions<Event> {
   streamKind: StreamKind;
   subscribeCommand: string;
   unsubscribeCommand: string;
@@ -31,8 +31,8 @@ export function subscribeStream<Event>(
   let closePromise: Promise<void> | undefined;
   let streamGeneration: string | undefined;
   let deliverySequence = 0n;
-  // Rust may deliver once before the receipt resolves; hold that event until then.
-  let pendingEvent: { event: Event } | undefined;
+  // Rust may deliver before the receipt resolves; queue events in order until then.
+  const pendingEvents: Event[] = [];
   let reportedFailure = false;
 
   const failClosed = (error: unknown): void => {
@@ -64,7 +64,7 @@ export function subscribeStream<Event>(
   const channel = new Channel<Event>();
   channel.onmessage = (event) => {
     if (closed) return;
-    if (streamGeneration === undefined) pendingEvent = { event };
+    if (streamGeneration === undefined) pendingEvents.push(event);
     else deliver(event);
   };
 
@@ -75,14 +75,20 @@ export function subscribeStream<Event>(
   });
   receipt.then((value) => {
     streamGeneration = value.streamGeneration;
-    if (pendingEvent === undefined || closed) return;
-    const { event } = pendingEvent;
-    pendingEvent = undefined;
-    deliver(event);
+    if (closed || pendingEvents.length === 0) {
+      pendingEvents.length = 0;
+      return;
+    }
+    const queued = pendingEvents.splice(0, pendingEvents.length);
+    for (const event of queued) {
+      if (closed) break;
+      deliver(event);
+    }
   }, failClosed);
 
   const close = (): Promise<void> => {
     closed = true;
+    pendingEvents.length = 0;
     closePromise ??= receipt
       .catch(() => undefined)
       // Unsubscribe is idempotent and also covers a lost subscribe response.

@@ -143,7 +143,7 @@ The result contains `core_version`, negotiated `protocol_version`,
 `data_version`, `capabilities`, and `raw_capture_default`. Only the methods
 documented below are callable. The battle read APIs are advertised as
 `battle_record_v1`, `battle_axis_v1`, and `battle_timeline_v1`; `equipment`
-identifies the local `nte-mods-plugin` bridge included in this Core build.
+identifies the local `UETools-NTE` Toolkit equipment bridge included in this Core build.
 
 ## Method reference
 
@@ -316,12 +316,12 @@ resolved yet.
 
 ## Equipment methods
 
-Equipment methods call ABI v4 / IPC v7 of `nte-mods-plugin` through the
-local `\\.\pipe\nte-mods-plugin-v7` named pipe. They do not inject or load
-the plugin; the matching plugin build must already be loaded by `HTGame.exe`.
-GUI users can install or remove the embedded plugin from **Console → Console
-Loadout** after closing the game and accepting the timed risk confirmation. The
-stdio Core itself never changes the game directory.
+Equipment methods call the local `UETools-NTE` Toolkit capture/equipment bridge
+(protocol v1, `equipment.execute.v1` / `inventory.snapshot.v1`). They do not
+inject or load the plugin; the matching Toolkit plugin must already be loaded
+by `HTGame.exe`. GUI users can install or manage the Toolkit plugin from
+**Console → Plugins** after closing the game and accepting the timed risk
+confirmation. The stdio Core itself never changes the game directory.
 Every character or equipment UID uses the same `{"slot":1,"serial":2}` shape
 returned by inventory snapshots. Both components must be nonzero and neither
 may be `4294967295` (`u32::MAX`). Module rows and columns are 1-based and must

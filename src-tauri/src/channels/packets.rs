@@ -2,7 +2,7 @@ use tauri::{State, WebviewWindow, ipc::Channel};
 
 use crate::{
     channels::stream_runtime::{
-        PollingStreamOutput, StreamDeliveryEndpoint, spawn_polling_stream, validate_subscription_id,
+        PollingStreamOutput, subscribe_polling_stream, unsubscribe_stream, validate_subscription_id,
     },
     commands::packets::snapshot_since,
     contract::{CommandError, SubscriptionReceipt, packets::PacketsEvent, stream::StreamKind},
@@ -22,18 +22,14 @@ pub(crate) fn subscribe_packets(
     console::validate_window(&window)?;
     state.packet_stream_revision()?;
 
-    let stream_kind = StreamKind::Packets;
-    let stream_key = stream_kind.stream_key(&subscription_id);
-    let state = state.inner().clone();
-    let registration = state.reserve_stream(window.label(), &stream_key)?;
-    let stream_generation = registration.generation();
     let mut last_revision = None;
-    spawn_polling_stream(
-        "nte-packets-stream",
-        StreamDeliveryEndpoint::new(on_event),
-        state,
-        registration,
+    subscribe_polling_stream(
+        subscription_id,
+        StreamKind::Packets,
         PACKETS_STREAM_INTERVAL_MS,
+        on_event,
+        state.inner(),
+        &window,
         move |state| {
             let Ok(current_revision) = state.packet_stream_revision() else {
                 return PollingStreamOutput::Stop;
@@ -52,14 +48,7 @@ pub(crate) fn subscribe_packets(
             last_revision = Some(revision);
             PollingStreamOutput::Event(event)
         },
-    )?;
-
-    Ok(SubscriptionReceipt::new(
-        subscription_id,
-        stream_kind,
-        stream_generation,
-        PACKETS_STREAM_INTERVAL_MS,
-    ))
+    )
 }
 #[tauri::command]
 pub(crate) fn unsubscribe_packets(
@@ -67,11 +56,11 @@ pub(crate) fn unsubscribe_packets(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    console::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::Packets.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::Packets,
+        state.inner(),
+        &window,
+        console::validate_window,
+    )
 }

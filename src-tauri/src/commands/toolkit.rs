@@ -4,7 +4,10 @@ use crate::{
     windows::{console, main_dps},
 };
 use nte_dps_tool::{
-    core::toolkit::{CombatStatus, DataMode},
+    core::toolkit::{
+        CombatStatus, DataMode, classify_loader_receipt, command_id, read_loader_receipt,
+        valid_plugin_file, validate_combat_status,
+    },
     platform::{
         network,
         toolkit::{ToolkitClient, ToolkitDescription, ToolkitError},
@@ -12,7 +15,7 @@ use nte_dps_tool::{
     storage::config::ModStudioLoadingMethod,
 };
 use serde::{Deserialize, Serialize};
-use std::{io::Read, path::PathBuf};
+use std::path::PathBuf;
 use tauri::{State, WebviewWindow};
 use ts_rs::TS;
 
@@ -223,9 +226,9 @@ fn snapshot(state: &AppState) -> PluginPanel {
         let (c, capabilities) = client()?;
         let identity = capabilities.operation_session;
         let capabilities = capabilities.commands;
-        let plugins = plugin_rows(c.json(3, 0, "", &|| false)?)?;
-        let combat: Option<CombatStatus> = if capabilities.contains(&100) {
-            match c.json(100, 0, "", &|| false) {
+        let plugins = plugin_rows(c.json(command_id::PLUGIN_LIST, 0, "", &|| false)?)?;
+        let combat: Option<CombatStatus> = if capabilities.contains(&command_id::COMBAT_STATUS) {
+            match c.json(command_id::COMBAT_STATUS, 0, "", &|| false) {
                 Ok(value) => Some(value),
                 Err(
                     ToolkitError::Unavailable
@@ -238,21 +241,11 @@ fn snapshot(state: &AppState) -> PluginPanel {
         } else {
             None
         };
-        if let Some(combat) = &combat
-            && (combat.encounter_id.len() > 256
-                || [
-                    combat.total_damage,
-                    combat.quality.direct,
-                    combat.quality.correlated,
-                    combat.quality.inferred,
-                    combat.quality.unknown,
-                ]
-                .iter()
-                .any(|x| !x.is_finite() || *x < 0.0))
-        {
-            return Err(CommandError::from(ToolkitError::InvalidProtocol));
+        if let Some(combat) = &combat {
+            validate_combat_status(combat)?;
         }
-        let operation = sanitize_operation(c.json(7, 0, "", &|| false)?)?;
+        let operation =
+            sanitize_operation(c.json(command_id::OPERATION_STATUS, 0, "", &|| false)?)?;
         Ok((plugins, combat, operation, capabilities, identity))
     })();
     match read {
@@ -285,7 +278,7 @@ fn snapshot(state: &AppState) -> PluginPanel {
 }
 // A resident image and a replacement candidate can share a filename in PluginList.
 fn plugin_rows(mut rows: Vec<Plugin>) -> Result<Vec<Plugin>, ToolkitError> {
-    if rows.len() > 64 || rows.iter().any(|p| !valid_file(&p.file)) {
+    if rows.len() > 64 || rows.iter().any(|p| !valid_plugin_file(&p.file)) {
         return Err(ToolkitError::InvalidProtocol);
     }
     rows.sort_by_cached_key(|p| {
@@ -304,14 +297,6 @@ fn plugin_rows(mut rows: Vec<Plugin>) -> Result<Vec<Plugin>, ToolkitError> {
     });
     rows.dedup_by(|a, b| a.file.eq_ignore_ascii_case(&b.file));
     Ok(rows)
-}
-fn valid_file(file: &str) -> bool {
-    file.len() <= 128
-        && file.ends_with(".dll")
-        && file
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
-        && !file.contains("..")
 }
 
 #[tauri::command]
@@ -366,12 +351,12 @@ pub(crate) async fn control_plugin(
     if state.data_mode() != DataMode::Plugin {
         return Err(CommandError::mod_studio_risk_acknowledgement_required());
     }
-    if !valid_file(&file) {
+    if !valid_plugin_file(&file) {
         return Err(CommandError::from(ToolkitError::Unsupported));
     }
     let command = match action {
-        PluginControlAction::Enable => 4,
-        PluginControlAction::Disable => 5,
+        PluginControlAction::Enable => command_id::PLUGIN_ENABLE,
+        PluginControlAction::Disable => command_id::PLUGIN_DISABLE,
     };
     // Combat collector owns start/stop. Never unload it under an active stream.
     if matches!(
@@ -421,8 +406,8 @@ pub(crate) enum HostAction {
 impl HostAction {
     fn command(self) -> u32 {
         match self {
-            Self::HostStatus => 2,
-            Self::Shutdown => 11,
+            Self::HostStatus => command_id::HOST_STATUS,
+            Self::Shutdown => command_id::HOST_SHUTDOWN,
         }
     }
 }
@@ -518,9 +503,7 @@ pub(crate) async fn set_host_loading_method(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = state.reserve_plugin_control()?;
-        state
-            .set_mod_studio_loading_method(method)
-            .map_err(|_| CommandError::settings_config_save_failed())?;
+        state.set_mod_studio_loading_method(method)?;
         Ok(snapshot(&state))
     })
     .await
@@ -543,18 +526,18 @@ pub(crate) async fn select_host_game_directory(
     // No reservation or hot lock is held while the native picker is open.
     let selected = crate::file_dialog::choose_game_directory(&window)
         .await
-        .map_err(|_| CommandError {
-            code: "plugin_game_directory_dialog_failed",
-            message_key: "Game directory selection failed.",
-            message_arguments: vec![],
-            diagnostic_line: None,
+        .map_err(|_| {
+            CommandError::new(
+                "plugin_game_directory_dialog_failed",
+                "Game directory selection failed.",
+            )
         })?;
     console::validate_window(&window)?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         if let crate::file_dialog::DialogOutcome::Selected(path) = selected {
             let directory =
-                nte_dps_tool::platform::mods_plugin::resolve_manual_game_directory(&path)
+                nte_dps_tool::platform::game_directory::resolve_manual_game_directory(&path)
                     .map_err(|_| directory_error())?;
             let text = directory
                 .to_str()
@@ -564,9 +547,7 @@ pub(crate) async fn select_host_game_directory(
                 })
                 .ok_or_else(directory_error)?;
             let _permit = state.reserve_plugin_control()?;
-            state
-                .set_proxy_game_directory(Some(text.to_owned()))
-                .map_err(|_| CommandError::settings_config_save_failed())?;
+            state.set_proxy_game_directory(Some(text.to_owned()))?;
         }
         Ok(snapshot(&state))
     })
@@ -583,9 +564,7 @@ pub(crate) async fn clear_host_game_directory(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = state.reserve_plugin_control()?;
-        state
-            .set_proxy_game_directory(None)
-            .map_err(|_| CommandError::settings_config_save_failed())?;
+        state.set_proxy_game_directory(None)?;
         Ok(snapshot(&state))
     })
     .await
@@ -600,12 +579,10 @@ pub(crate) async fn uninstall_proxy_host(
 ) -> Result<PluginPanel, CommandError> {
     console::validate_window(&window)?;
     if !confirmed {
-        return Err(CommandError {
-            code: "plugin_confirmation_required",
-            message_key: "Confirm the plugin operation before continuing.",
-            message_arguments: vec![],
-            diagnostic_line: None,
-        });
+        return Err(CommandError::new(
+            "plugin_confirmation_required",
+            "Confirm the plugin operation before continuing.",
+        ));
     }
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -622,15 +599,13 @@ pub(crate) async fn uninstall_proxy_host(
             .map_err(|_| CommandError::from(ToolkitError::Failed))?
             .is_some()
         {
-            return Err(CommandError {
-                code: "plugin_close_game_required",
-                message_key: "Close the game before removing the proxy host.",
-                message_arguments: vec![],
-                diagnostic_line: None,
-            });
+            return Err(CommandError::new(
+                "plugin_close_game_required",
+                "Close the game before removing the proxy host.",
+            ));
         }
         let manual = state.proxy_game_directory();
-        let destination = nte_dps_tool::platform::mods_plugin::toolkit_game_directory(
+        let destination = nte_dps_tool::platform::game_directory::toolkit_game_directory(
             manual.as_deref().map(std::path::Path::new),
         )
         .map_err(|_| directory_error())?;
@@ -744,7 +719,7 @@ fn deploy_proxy_host(
         ));
     }
     let manual = state.proxy_game_directory();
-    let destination = nte_dps_tool::platform::mods_plugin::toolkit_game_directory(
+    let destination = nte_dps_tool::platform::game_directory::toolkit_game_directory(
         manual.as_deref().map(std::path::Path::new),
     )
     .map_err(|_| {
@@ -761,18 +736,6 @@ fn deploy_proxy_host(
         .map_err(CommandError::from_mod_market)
 }
 
-const MAX_LOADER_RECEIPT_BYTES: usize = 64 * 1024;
-
-fn read_loader_receipt(mut output: impl std::io::Read) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    output
-        .by_ref()
-        .take(MAX_LOADER_RECEIPT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    std::io::copy(&mut output, &mut std::io::sink())?;
-    Ok(bytes)
-}
-
 fn loader_spawn_failed(error: &std::io::Error) -> CommandError {
     CommandError::with_arguments(
         "plugin_loader_launch_failed",
@@ -786,97 +749,16 @@ fn loader_spawn_failed(error: &std::io::Error) -> CommandError {
 }
 
 fn loader_receipt_error(bytes: &[u8], exit: Option<i32>) -> CommandError {
-    let receipt = (bytes.len() <= MAX_LOADER_RECEIPT_BYTES)
-        .then(|| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-        .flatten();
-    let receipt = receipt.filter(|r| r["schemaVersion"] == 1 && r["ok"] == false);
-    let mut phase = "unknown";
-    let mut reason = "unclassified";
-    let mut win32 = "unknown".to_owned();
-    let mut cleanup = "unknown".to_owned();
-    if let Some(r) = receipt {
-        phase = match r["phase"].as_str() {
-            Some("arguments") => "arguments",
-            Some("elevation") => "elevation",
-            Some("driver_inspect") => "driver_inspect",
-            Some("target") => "target",
-            Some("host_check") => "host_check",
-            Some("driver_start") => "driver_start",
-            Some("load") => "load",
-            Some("connect") => "connect",
-            Some("driver_stop") => "driver_stop",
-            _ => "unknown",
-        };
-        // Exact allowlist of path-free errors from the current native Loader.
-        // Unknown text remains private; a future Loader cannot inject paths here.
-        reason = match r["error"].as_str() {
-            Some("expected exactly one HTGame.exe; start the game or select --pid explicitly") => {
-                "target_not_unique"
-            }
-            Some("target is not HTGame.exe") => "target_wrong_image",
-            Some("target must be native Windows x64") => "target_wrong_architecture",
-            Some(
-                "target process has exited"
-                | "target process exited"
-                | "target exited before Toolkit IPC ready",
-            ) => "target_exited",
-            Some(
-                "host must resolve to d3d12.dll, not a plugin"
-                | "plugin image is not a host; only the host may load plugins",
-            ) => "host_wrong_image",
-            Some("driver lacks the required memory protocol marker") => "driver_protocol_mismatch",
-            Some(
-                "UETools has an orphan service/channel; normal SCM unload is unavailable; no forced unload",
-            ) => "driver_orphan_channel",
-            Some(
-                "previous driver lifecycle was abandoned; cleanup only, do not reinject automatically",
-            ) => "driver_abandoned_lifecycle",
-            Some("D3D12 device creation failed; cannot install the reflective trigger") => {
-                "d3d12_device_failed"
-            }
-            Some("D3D12 command queue creation failed") => "d3d12_queue_failed",
-            Some("DXGI factory creation failed") => "dxgi_factory_failed",
-            Some("DXGI swapchain creation failed; cannot install the reflective trigger") => {
-                "dxgi_swapchain_failed"
-            }
-            Some("host library load returned null (DllMain or path failure)") => {
-                "host_library_load_failed"
-            }
-            Some("Toolkit heartbeat stale") => "ipc_heartbeat_stale",
-            Some("Toolkit response identity mismatch") => "ipc_identity_mismatch",
-            Some("Toolkit Describe returned failure") => "ipc_describe_failed",
-            _ => "unclassified",
-        };
-        let number = |v: &serde_json::Value| {
-            v.as_u64()
-                .filter(|n| *n <= u32::MAX as u64)
-                .map(|n| n.to_string())
-        };
-        win32 = number(&r["win32"]).unwrap_or_else(|| "unknown".into());
-        cleanup = if r["driver"]["stopped"] == true {
-            "stopped".into()
-        } else {
-            number(&r["driver"]["cleanupWin32"]).unwrap_or_else(|| "unconfirmed".into())
-        };
-    }
-    let code = match phase {
-        "elevation" => "plugin_loader_elevation_failed",
-        "driver_inspect" | "driver_start" | "driver_stop" => "plugin_loader_driver_failed",
-        "target" => "plugin_loader_target_failed",
-        "host_check" => "plugin_loader_host_invalid",
-        "load" => "plugin_loader_load_failed",
-        "connect" => "plugin_loader_handshake_failed",
-        _ => "plugin_loader_result_invalid",
-    };
+    let failure = classify_loader_receipt(bytes, exit);
     CommandError::with_arguments(
-        code,
+        failure.code,
         "Loader failed: stage={}, reason={}, exit={}, Win32={}, driver cleanup={}. Check this stage before retrying; host startup may have been attempted.",
         vec![
-            phase.into(),
-            reason.into(),
-            exit.map_or("unknown".into(), |n| n.to_string()),
-            win32,
-            cleanup,
+            failure.phase.into(),
+            failure.reason.into(),
+            failure.exit,
+            failure.win32,
+            failure.cleanup,
         ],
     )
 }
@@ -901,15 +783,26 @@ mod tests {
             "plugin_loader_result_invalid"
         );
         assert_eq!(
-            loader_receipt_error(&vec![b' '; MAX_LOADER_RECEIPT_BYTES + 1], None).code,
+            loader_receipt_error(
+                &vec![b' '; nte_dps_tool::core::toolkit::MAX_LOADER_RECEIPT_BYTES + 1],
+                None
+            )
+            .code,
             "plugin_loader_result_invalid"
         );
-        let mut input = std::io::Cursor::new(vec![b'x'; MAX_LOADER_RECEIPT_BYTES * 2]);
+        let mut input = std::io::Cursor::new(vec![
+            b'x';
+            nte_dps_tool::core::toolkit::MAX_LOADER_RECEIPT_BYTES
+                * 2
+        ]);
         assert_eq!(
             read_loader_receipt(&mut input).unwrap().len(),
-            MAX_LOADER_RECEIPT_BYTES + 1
+            nte_dps_tool::core::toolkit::MAX_LOADER_RECEIPT_BYTES + 1
         );
-        assert_eq!(input.position(), (MAX_LOADER_RECEIPT_BYTES * 2) as u64);
+        assert_eq!(
+            input.position(),
+            (nte_dps_tool::core::toolkit::MAX_LOADER_RECEIPT_BYTES * 2) as u64
+        );
     }
     #[test]
     fn loading_methods_share_the_managed_runtime_layout() {
@@ -1002,11 +895,11 @@ mod tests {
     }
     #[test]
     fn plugin_control_never_accepts_paths_or_scripts() {
-        assert!(valid_file("NTE_PluginCombat.dll"));
+        assert!(valid_plugin_file("NTE_PluginCombat.dll"));
         for file in [
             "../a.dll", "a/b.dll", "a\\b.dll", "a.nte", "C:a.dll", "..dll",
         ] {
-            assert!(!valid_file(file));
+            assert!(!valid_plugin_file(file));
         }
     }
 }

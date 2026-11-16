@@ -577,7 +577,7 @@ fn history_party_label(record: &HistoryRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::stream::MAX_STREAM_DELIVERY_BYTES;
+    use crate::contract::stream::tests::MAX_STREAM_DELIVERY_BYTES;
     use nte_dps_tool::engine::model::CombatSessionAbyssSummary;
 
     #[test]

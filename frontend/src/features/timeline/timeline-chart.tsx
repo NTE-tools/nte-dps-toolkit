@@ -15,6 +15,7 @@ import {
   ContextMenuPositioner,
   ContextMenuTrigger,
 } from "@/components/ui/menu";
+import { useCloseOnWindowBlur } from "@/hooks/use-close-on-window-blur";
 import { t, tf } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
@@ -135,10 +136,14 @@ export function TimelineChart({
         size.height,
         size.devicePixelRatio,
       );
-      canvas.width = backing.width;
-      canvas.height = backing.height;
+      if (canvas.width !== backing.width || canvas.height !== backing.height) {
+        canvas.width = backing.width;
+        canvas.height = backing.height;
+      }
       canvas.style.width = `${size.width}px`;
       canvas.style.height = `${size.height}px`;
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, canvas.width, canvas.height);
       context.setTransform(
         size.devicePixelRatio,
         0,
@@ -152,14 +157,7 @@ export function TimelineChart({
     return () => window.cancelAnimationFrame(frame);
   }, [hoveredBucketIndex, model, size, snapshot, userMarkers]);
 
-  useEffect(() => {
-    if (contextMenu === null) return;
-    const closeContextMenuOnWindowBlur = () => setContextMenu(null);
-    window.addEventListener("blur", closeContextMenuOnWindowBlur);
-    return () => {
-      window.removeEventListener("blur", closeContextMenuOnWindowBlur);
-    };
-  }, [contextMenu]);
+  useCloseOnWindowBlur(contextMenu !== null, () => setContextMenu(null));
 
   const hoveredBucket =
     hoveredBucketIndex === null

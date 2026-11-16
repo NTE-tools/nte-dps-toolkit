@@ -38,6 +38,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -89,13 +90,6 @@
   transition-duration: 0.01ms !important;
 }
 
-.console-page-stage[data-active="true"] {
-  animation: ui-page-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-  transform-origin: center top;
-  view-transition-name: console-page;
-}
-
 ::view-transition-old(console-page) {
   animation: ui-page-leave var(--motion-duration-base)
     var(--motion-ease-standard) both;
@@ -106,336 +100,320 @@
     var(--motion-ease-emphasized) both;
 }
 
-.window-motion-surface {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-}
+@layer components {
+  .console-page-stage[data-active="true"] {
+    animation: ui-page-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+    transform-origin: center top;
+    view-transition-name: console-page;
+  }
 
-.window-motion-surface[data-window-motion="enter"] {
-  animation: ui-window-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .window-motion-surface {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
 
-.window-motion-surface[data-window-motion="exit"] {
-  pointer-events: none;
-  animation: ui-window-exit var(--motion-duration-base)
-    var(--motion-ease-standard) both;
-}
+  .window-motion-surface[data-window-motion="enter"] {
+    animation: ui-window-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.motion-route-loading {
-  animation: ui-content-reveal var(--motion-duration-slow)
-    var(--motion-ease-standard) both;
-}
+  .window-motion-surface[data-window-motion="exit"] {
+    pointer-events: none;
+    animation: ui-window-exit var(--motion-duration-base)
+      var(--motion-ease-standard) both;
+  }
 
-.motion-content-ready {
-  animation: ui-content-ready var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .motion-route-loading {
+    animation: ui-content-reveal var(--motion-duration-slow)
+      var(--motion-ease-standard) both;
+  }
 
-.motion-skeleton {
-  position: relative;
-  overflow: hidden;
-}
+  .motion-content-ready {
+    animation: ui-content-ready var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.motion-skeleton::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    105deg,
-    transparent 20%,
-    color-mix(in oklab, var(--foreground) 9%, transparent) 42%,
-    transparent 64%
-  );
-  content: "";
-  transform: translateX(-100%);
-  animation: ui-skeleton-shimmer 1.3s var(--motion-ease-standard) infinite;
-}
+  .motion-skeleton {
+    position: relative;
+    overflow: hidden;
+  }
 
-.motion-notice-stack {
-  position: fixed;
-  inset-inline: 0;
-  top: 0.75rem;
-  z-index: 80;
-  display: grid;
-  width: fit-content;
-  max-width: min(92vw, 34rem);
-  gap: 0.375rem;
-  margin-inline: auto;
-  pointer-events: none;
-}
+  .motion-skeleton::after {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      105deg,
+      transparent 20%,
+      color-mix(in oklab, var(--foreground) 9%, transparent) 42%,
+      transparent 64%
+    );
+    content: "";
+    transform: translateX(-100%);
+    animation: ui-skeleton-shimmer 1.3s var(--motion-ease-standard) infinite;
+  }
 
-.motion-action-notice {
-  min-width: min(22rem, 88vw);
-  pointer-events: auto;
-  animation: ui-notice-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .motion-notice-stack {
+    position: fixed;
+    inset-inline: 0;
+    top: 0.75rem;
+    z-index: 80;
+    display: grid;
+    width: fit-content;
+    max-width: min(92vw, 34rem);
+    gap: 0.375rem;
+    margin-inline: auto;
+    pointer-events: none;
+  }
 
-.motion-action-notice[data-compact="true"] {
-  min-width: 0;
-}
+  .motion-action-notice {
+    min-width: min(22rem, 88vw);
+    pointer-events: auto;
+    animation: ui-notice-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.motion-action-notice[data-status="success"] .motion-notice-icon {
-  animation: ui-success-pop var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .motion-action-notice[data-compact="true"] {
+    min-width: 0;
+  }
 
-.motion-number {
-  display: inline-block;
-  min-width: 0;
-  font-variant-numeric: tabular-nums;
-  will-change: contents;
-}
+  .motion-action-notice[data-status="success"] .motion-notice-icon {
+    animation: ui-success-pop var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.console-sidebar-scroll {
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
-}
+  .motion-number {
+    display: inline-block;
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+    will-change: contents;
+  }
 
-.console-sidebar-scroll::-webkit-scrollbar:horizontal {
-  height: 0;
-}
+  .console-sidebar-scroll {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+  }
 
-.motion-popover {
-  transform-origin: var(--motion-popover-origin, right top);
-  animation: ui-popover-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .console-sidebar-scroll::-webkit-scrollbar:horizontal {
+    height: 0;
+  }
 
-.hud-layout-module {
-  position: relative;
-  width: 100%;
-  animation: ui-content-reveal var(--motion-duration-base)
-    var(--motion-ease-standard) both;
-}
+  .motion-popover {
+    transform-origin: var(--motion-popover-origin, right top);
+    animation: ui-popover-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.island-screen-layer {
-  justify-items: center;
-  pointer-events: none;
-}
+  .hud-layout-module {
+    position: relative;
+    width: 100%;
+    animation: ui-content-reveal var(--motion-duration-base)
+      var(--motion-ease-standard) both;
+  }
 
-.motion-island {
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  transform-origin: center top;
-  will-change: opacity, transform, border-radius;
-  animation: ui-island-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .island-screen-layer {
+    justify-items: center;
+    pointer-events: none;
+  }
 
-html[data-window-route="notification-island"]
-  .window-motion-surface[data-window-motion] {
-  animation: none;
-}
+  .motion-island {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    transform-origin: center top;
+    will-change: opacity, transform, border-radius;
+    animation: ui-island-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-html[data-window-route="notification-island"] .motion-skeleton {
-  background: color-mix(in oklab, var(--background) 96%, transparent);
-}
+  html[data-window-route="notification-island"]
+    .window-motion-surface[data-window-motion] {
+    animation: none;
+  }
 
-.motion-island[data-exiting="true"] {
-  pointer-events: none;
-  animation: ui-island-exit var(--motion-duration-base)
-    var(--motion-ease-standard) both;
-}
+  html[data-window-route="notification-island"] .motion-skeleton {
+    background: color-mix(in oklab, var(--background) 96%, transparent);
+  }
 
-.motion-island::after {
-  position: absolute;
-  inset-inline: 1.75rem;
-  bottom: 0.2rem;
-  height: 0.125rem;
-  border-radius: 999px;
-  background: currentColor;
-  content: "";
-  opacity: 0.7;
-  transform-origin: left center;
-  animation: ui-island-progress var(--island-duration, 5s) linear both;
-}
+  .motion-island[data-exiting="true"] {
+    pointer-events: none;
+    animation: ui-island-exit var(--motion-duration-base)
+      var(--motion-ease-standard) both;
+  }
 
-.motion-island-icon {
-  animation: ui-island-icon-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .motion-island::after {
+    position: absolute;
+    inset-inline: 1.75rem;
+    bottom: 0.2rem;
+    height: 0.125rem;
+    border-radius: 999px;
+    background: currentColor;
+    content: "";
+    opacity: 0.7;
+    transform-origin: left center;
+    animation: ui-island-progress var(--island-duration, 5s) linear both;
+  }
 
-.motion-island-content {
-  animation: ui-island-content-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .motion-island-icon {
+    animation: ui-island-icon-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.motion-bar {
-  transition: width var(--motion-duration-slow) var(--motion-ease-emphasized);
-}
+  .motion-island-content {
+    animation: ui-island-content-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.main-dps-hit-type {
-  position: relative;
-  display: inline-flex;
-  width: min(100%, 16rem);
-  min-width: 0;
-  max-width: 100%;
-  min-height: 2rem;
-  align-items: center;
-  justify-content: center;
-  padding: 0.3rem 1.5rem;
-  border: var(--ui-border-width) solid
-    color-mix(in oklab, var(--primary) 18%, var(--border));
-  border-radius: 0.5rem;
-  background: color-mix(in oklab, var(--primary) 5%, var(--background));
-  box-shadow:
-    0 1px 2px color-mix(in oklab, var(--foreground) 6%, transparent),
-    inset 0 1px color-mix(in oklab, var(--background) 78%, transparent);
-  color: var(--foreground);
-}
+  .motion-bar {
+    transition: width var(--motion-duration-slow) var(--motion-ease-emphasized);
+  }
 
-.main-dps-hit-type-marker {
-  position: absolute;
-  inset-inline-start: 0.6rem;
-  width: 0.2rem;
-  height: 1rem;
-  flex: none;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--primary) 78%, var(--foreground));
-}
+  .main-dps-hit-type {
+    position: relative;
+    display: inline-flex;
+    width: min(100%, 16rem);
+    min-width: 0;
+    max-width: 100%;
+    min-height: 2rem;
+    align-items: center;
+    justify-content: center;
+    padding: 0.3rem 0.75rem;
+    border: var(--ui-border-width) solid
+      color-mix(in oklab, var(--primary) 18%, var(--border));
+    border-radius: 0.5rem;
+    background: color-mix(in oklab, var(--primary) 5%, var(--background));
+    box-shadow:
+      0 1px 2px color-mix(in oklab, var(--foreground) 6%, transparent),
+      inset 0 1px color-mix(in oklab, var(--background) 78%, transparent);
+    color: var(--foreground);
+  }
 
-.main-dps-hit-type-detail {
-  margin-left: 0.35rem;
-  padding: 0.12rem 0.42rem;
-  border-radius: 0.35rem;
-  background: color-mix(in oklab, var(--primary) 9%, transparent);
-  color: color-mix(in oklab, var(--primary) 72%, var(--foreground));
-  font-weight: 650;
-}
+  .main-dps-hit-type-detail {
+    margin-left: 0.35rem;
+    padding: 0.12rem 0.42rem;
+    border-radius: 0.35rem;
+    background: color-mix(in oklab, var(--primary) 9%, transparent);
+    color: color-mix(in oklab, var(--primary) 72%, var(--foreground));
+    font-weight: 650;
+  }
 
-.main-dps-hit-type[data-direction="incoming"] {
-  border-color: color-mix(in oklab, var(--destructive) 24%, var(--border));
-  background: color-mix(in oklab, var(--destructive) 6%, var(--background));
-}
+  .main-dps-hit-type[data-direction="incoming"] {
+    border-color: color-mix(in oklab, var(--destructive) 24%, var(--border));
+    background: color-mix(in oklab, var(--destructive) 6%, var(--background));
+  }
 
-.main-dps-hit-type[data-direction="incoming"] .main-dps-hit-type-marker {
-  background: var(--destructive);
-}
+  .main-dps-hit-type[data-direction="incoming"] .main-dps-hit-type-detail {
+    background: color-mix(in oklab, var(--destructive) 9%, transparent);
+    color: color-mix(in oklab, var(--destructive) 74%, var(--foreground));
+  }
 
-.main-dps-hit-type[data-direction="incoming"] .main-dps-hit-type-detail {
-  background: color-mix(in oklab, var(--destructive) 9%, transparent);
-  color: color-mix(in oklab, var(--destructive) 74%, var(--foreground));
-}
+  .main-dps-hit-type[data-direction="unknown"] {
+    border-style: dashed;
+    border-color: var(--border);
+    background: var(--muted);
+    color: var(--muted-foreground);
+    box-shadow: none;
+  }
 
-.main-dps-hit-type[data-direction="unknown"] {
-  border-style: dashed;
-  border-color: var(--border);
-  background: var(--muted);
-  color: var(--muted-foreground);
-  box-shadow: none;
-}
+  .max-hp-compression-effect {
+    position: relative;
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.25rem;
+    border: var(--ui-border-width) solid
+      color-mix(in oklab, var(--chart-2) 32%, var(--border));
+    border-radius: 0.375rem;
+    background: color-mix(in oklab, var(--chart-2) 8%, var(--background));
+    color: color-mix(in oklab, var(--chart-2) 76%, var(--foreground));
+    white-space: nowrap;
+  }
 
-.main-dps-hit-type[data-direction="unknown"] .main-dps-hit-type-marker {
-  background: var(--muted-foreground);
-}
+  .max-hp-compression-effect[data-active="true"] {
+    animation: ui-max-hp-compression-enter var(--motion-duration-slow)
+      var(--motion-ease-standard) both;
+  }
 
-.max-hp-compression-effect {
-  position: relative;
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 0.25rem;
-  border: var(--ui-border-width) solid
-    color-mix(in oklab, oklch(0.62 0.18 300) 26%, var(--border));
-  border-radius: 0.375rem;
-  background: color-mix(in oklab, oklch(0.68 0.16 300) 7%, var(--background));
-  box-shadow: inset 2px 0
-    color-mix(in oklab, oklch(0.62 0.18 300) 52%, transparent);
-  color: color-mix(in oklab, oklch(0.54 0.18 300) 76%, var(--foreground));
-  white-space: nowrap;
-}
+  .max-hp-compression-effect[data-compact="true"] {
+    border-color: transparent;
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--chart-2) 11%, transparent);
+  }
 
-.max-hp-compression-effect[data-active="true"] {
-  animation: ui-max-hp-compression-enter var(--motion-duration-slow)
-    var(--motion-ease-standard) both;
-}
+  .max-hp-compression-icon {
+    opacity: 0.72;
+  }
 
-.max-hp-compression-effect[data-compact="true"] {
-  border-color: transparent;
-  border-radius: 999px;
-  background: color-mix(in oklab, oklch(0.68 0.16 300) 10%, transparent);
-  box-shadow: none;
-}
+  .max-hp-compression-effect[data-active="true"] .max-hp-compression-icon {
+    animation: ui-max-hp-compression-icon var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.max-hp-compression-icon {
-  opacity: 0.72;
-}
+  .max-hp-compression-percent {
+    border-left: var(--ui-border-width) solid
+      color-mix(in oklab, currentColor 28%, transparent);
+    padding-left: 0.3rem;
+    font-weight: 700;
+  }
 
-.max-hp-compression-effect[data-active="true"] .max-hp-compression-icon {
-  animation: ui-max-hp-compression-icon var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .max-hp-compression-cut {
+    z-index: 0;
+    border-left: var(--ui-border-width) solid
+      color-mix(in oklab, var(--chart-2) 44%, transparent);
+    background: linear-gradient(
+      to left,
+      color-mix(in oklab, var(--chart-2) 14%, transparent),
+      transparent
+    );
+    animation: ui-max-hp-compression-cut var(--motion-duration-slow)
+      var(--motion-ease-standard) both;
+  }
 
-.max-hp-compression-percent {
-  border-left: var(--ui-border-width) solid
-    color-mix(in oklab, currentColor 28%, transparent);
-  padding-left: 0.3rem;
-  font-weight: 700;
-}
+  .motion-list-item {
+    animation: ui-list-item-enter var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+    animation-delay: min(calc(var(--motion-index, 0) * 24ms), 144ms);
+  }
 
-.max-hp-compression-cut {
-  z-index: 0;
-  border-left: var(--ui-border-width) solid
-    color-mix(in oklab, oklch(0.62 0.18 300) 44%, transparent);
-  background: linear-gradient(
-    to left,
-    color-mix(in oklab, oklch(0.68 0.16 300) 14%, transparent),
-    transparent
-  );
-  animation: ui-max-hp-compression-cut var(--motion-duration-slow)
-    var(--motion-ease-standard) both;
-}
+  .ui-motion-overlay {
+    animation: ui-overlay-in var(--motion-duration-base)
+      var(--motion-ease-standard) both;
+  }
 
-.motion-list-item {
-  animation: ui-list-item-enter var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-  animation-delay: min(calc(var(--motion-index, 0) * 24ms), 144ms);
-}
+  .ui-motion-dialog {
+    animation: ui-dialog-in var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+    transform-origin: center top;
+  }
 
-.ui-motion-overlay,
-[data-slot="dialog-backdrop"],
-[data-slot="alert-dialog-backdrop"] {
-  animation: ui-overlay-in var(--motion-duration-base)
-    var(--motion-ease-standard) both;
-}
+  .ui-motion-alert,
+  [data-slot="alert"] {
+    animation: ui-alert-in var(--motion-duration-slow)
+      var(--motion-ease-emphasized) both;
+  }
 
-.ui-motion-dialog,
-[data-slot="dialog-popup"],
-[data-slot="alert-dialog-popup"] {
-  animation: ui-dialog-in var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-  transform-origin: center top;
-}
+  .console-nav-row {
+    position: relative;
+    transition:
+      color var(--motion-duration-fast) var(--motion-ease-standard),
+      background-color var(--motion-duration-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-duration-base) var(--motion-ease-standard),
+      transform var(--motion-duration-base) var(--motion-ease-emphasized);
+  }
 
-.ui-motion-alert,
-[data-slot="alert"] {
-  animation: ui-alert-in var(--motion-duration-slow)
-    var(--motion-ease-emphasized) both;
-}
+  .console-nav-row[aria-current="page"] {
+    transform: translateX(0);
+  }
 
-.console-nav-row {
-  position: relative;
-  transition:
-    color var(--motion-duration-fast) var(--motion-ease-standard),
-    background-color var(--motion-duration-fast) var(--motion-ease-standard),
-    box-shadow var(--motion-duration-base) var(--motion-ease-standard),
-    transform var(--motion-duration-base) var(--motion-ease-emphasized);
-}
+  .console-nav-row:active:not(:disabled) {
+    transform: scale(0.98);
+  }
 
-.console-nav-row[aria-current="page"] {
-  transform: translateX(0);
-}
-
-.console-nav-row:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-.console-nav-row[aria-current="page"]:active:not(:disabled) {
-  transform: scale(0.98);
+  .console-nav-row[aria-current="page"]:active:not(:disabled) {
+    transform: scale(0.98);
+  }
 }
 
 @keyframes ui-page-enter {
@@ -695,44 +673,46 @@ html[data-window-route="notification-island"] .motion-skeleton {
   }
 }
 
-.timeline-panel {
-  position: relative;
-  border: var(--ui-border-width) solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-sm);
-}
-
-.timeline-chart-shell {
-  flex-basis: 20rem;
-  border: var(--ui-border-width) solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-sm);
-}
-
-@media (max-height: 800px) {
-  .timeline-chart-shell {
-    min-height: 14rem;
+@layer components {
+  .timeline-panel {
+    position: relative;
+    border: var(--ui-border-width) solid var(--border);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
   }
-}
 
-.timeline-chart-glass {
-  background: var(--background);
-  box-shadow: var(--shadow-sm);
-}
+  .timeline-chart-shell {
+    flex-basis: 20rem;
+    border: var(--ui-border-width) solid var(--border);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
+  }
 
-.timeline-hover-lens {
-  background: color-mix(in oklab, var(--muted) 35%, transparent);
-  border-inline: var(--ui-border-width) solid
-    color-mix(in oklab, var(--border) 55%, transparent);
-}
+  @media (max-height: 800px) {
+    .timeline-chart-shell {
+      min-height: 14rem;
+    }
+  }
 
-.timeline-tooltip {
-  animation: timeline-tooltip-in var(--motion-duration-fast)
-    var(--motion-ease-standard) both;
-}
+  .timeline-chart-glass {
+    background: var(--background);
+    box-shadow: var(--shadow-sm);
+  }
 
-.timeline-marker-label {
-  box-shadow: 0 6px 18px -12px rgb(0 0 0 / 45%);
+  .timeline-hover-lens {
+    background: color-mix(in oklab, var(--muted) 35%, transparent);
+    border-inline: var(--ui-border-width) solid
+      color-mix(in oklab, var(--border) 55%, transparent);
+  }
+
+  .timeline-tooltip {
+    animation: timeline-tooltip-in var(--motion-duration-fast)
+      var(--motion-ease-standard) both;
+  }
+
+  .timeline-marker-label {
+    box-shadow: var(--shadow-sm);
+  }
 }
 
 @keyframes timeline-tooltip-in {
@@ -750,28 +730,6 @@ html[data-window-route="notification-island"] .motion-skeleton {
   .timeline-tooltip {
     animation: none;
   }
-}
-
-.mod-source-editor-shell[data-editor-theme="light"] {
-  color-scheme: light;
-  --editor-background: #ffffff;
-  --editor-status-background: #007acc;
-  --editor-status-foreground: #ffffff;
-  --editor-status-border: rgb(255 255 255 / 28%);
-  --editor-status-hover: rgb(255 255 255 / 16%);
-}
-
-.mod-source-editor-shell[data-editor-theme="dark"] {
-  color-scheme: dark;
-  --editor-background: #1e1e1e;
-  --editor-status-background: #007acc;
-  --editor-status-foreground: #ffffff;
-  --editor-status-border: rgb(255 255 255 / 28%);
-  --editor-status-hover: rgb(255 255 255 / 16%);
-}
-
-.mod-source-monaco {
-  min-width: 0;
 }
 
 @layer base {

@@ -100,15 +100,19 @@ export function useHistory() {
   }, [refresh]);
 
   useEffect(() => {
+    let active = true;
     const unsubscribe = historyClient.subscribe(
       (snapshot) => {
-        if (mounted.current) applySnapshot(snapshot);
+        if (active) applySnapshot(snapshot);
       },
       (error) => {
-        if (mounted.current) setMutationError(error);
+        if (active) setMutationError(error);
       },
     );
-    return () => void unsubscribe();
+    return () => {
+      active = false;
+      void unsubscribe().catch(() => undefined);
+    };
   }, [applySnapshot]);
 
   useEffect(() => {

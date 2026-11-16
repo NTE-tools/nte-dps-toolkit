@@ -2,7 +2,7 @@ use tauri::{State, WebviewWindow, ipc::Channel};
 
 use crate::{
     channels::stream_runtime::{
-        PollingStreamOutput, StreamDeliveryEndpoint, spawn_blocking_polling_stream,
+        PollingStreamOutput, subscribe_blocking_polling_stream, unsubscribe_stream,
         validate_subscription_id,
     },
     commands::empty_curtain::{poll_plugin_changes, snapshot_with_operation},
@@ -24,17 +24,14 @@ pub(crate) fn subscribe_empty_curtain(
     validate_subscription_id(&subscription_id)?;
     console::validate_window(&window)?;
     state.empty_curtain_revision_and_operation()?;
-    let stream_kind = StreamKind::EmptyCurtain;
-    let stream_key = stream_kind.stream_key(&subscription_id);
-    let state = state.inner().clone();
-    let registration = state.reserve_stream(window.label(), &stream_key)?;
-    let stream_generation = registration.generation();
     let mut last_revision = None;
-    spawn_blocking_polling_stream(
-        StreamDeliveryEndpoint::new(on_event),
-        state,
-        registration,
+    subscribe_blocking_polling_stream(
+        subscription_id,
+        StreamKind::EmptyCurtain,
         EMPTY_CURTAIN_STREAM_INTERVAL_MS,
+        on_event,
+        state.inner(),
+        &window,
         move |state, stop| {
             if let Err(error) = poll_plugin_changes(state, stop)
                 && !stop.load(std::sync::atomic::Ordering::Acquire)
@@ -70,13 +67,7 @@ pub(crate) fn subscribe_empty_curtain(
             last_revision = Some(revision);
             PollingStreamOutput::Event(EmptyCurtainEvent::Snapshot(next))
         },
-    )?;
-    Ok(SubscriptionReceipt::new(
-        subscription_id,
-        stream_kind,
-        stream_generation,
-        EMPTY_CURTAIN_STREAM_INTERVAL_MS,
-    ))
+    )
 }
 #[tauri::command]
 pub(crate) fn unsubscribe_empty_curtain(
@@ -84,11 +75,11 @@ pub(crate) fn unsubscribe_empty_curtain(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    console::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::EmptyCurtain.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::EmptyCurtain,
+        state.inner(),
+        &window,
+        console::validate_window,
+    )
 }

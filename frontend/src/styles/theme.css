@@ -18,13 +18,19 @@
     --ui-font-title: 20px;
     --ui-font-body: 14px;
     --ui-font-caption: 12px;
-    --ui-border-width: 0.5px;
+    --ui-border-width: 1px;
     --radius: 0.5rem;
     --motion-duration-fast: 120ms;
     --motion-duration-base: 180ms;
     --motion-duration-slow: 250ms;
     --motion-ease-standard: cubic-bezier(0.2, 0, 0, 1);
     --motion-ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @media (min-resolution: 1.5dppx) {
+    :root {
+      --ui-border-width: 0.5px;
+    }
   }
 
   :root,
@@ -45,6 +51,7 @@
     --accent: #272a2d;
     --accent-foreground: #edeef0;
     --destructive: #ff9592;
+    --destructive-foreground: #111113;
     --border: #363a3f;
     --input: #43484e;
     --ring: #5a6169;
@@ -87,6 +94,7 @@
     --accent: #e8e8ec;
     --accent-foreground: #1c2024;
     --destructive: #ce2c31;
+    --destructive-foreground: #ffffff;
     --border: #d9d9e0;
     --input: #cdced6;
     --ring: #b9bbc6;
@@ -180,19 +188,36 @@
     --sidebar-primary-foreground: #ffffff;
   }
 
-  [data-theme-preset="tactical"],
-  [data-theme-preset="tactical"] .console-light {
+  [data-theme-preset="tactical"] {
     --radius: 0.35rem;
-    --border: var(--console-success);
-    --input: var(--console-success);
+    --border: #2b4a3e;
+    --input: #365c4d;
+    --sidebar-border: #2b4a3e;
   }
 
-  [data-theme-preset="high_contrast"],
+  [data-theme-preset="tactical"].console-light,
+  [data-theme-preset="tactical"] .console-light {
+    --radius: 0.35rem;
+    --border: #9ec4b2;
+    --input: #85b39e;
+    --sidebar-border: #9ec4b2;
+  }
+
+  [data-theme-preset="high_contrast"] {
+    --radius: 0.2rem;
+    --ui-border-width: 1px;
+    --border: #d0d4dc;
+    --input: #e2e5ec;
+    --sidebar-border: #d0d4dc;
+  }
+
+  [data-theme-preset="high_contrast"].console-light,
   [data-theme-preset="high_contrast"] .console-light {
     --radius: 0.2rem;
     --ui-border-width: 1px;
-    --border: currentColor;
-    --input: currentColor;
+    --border: #2b2f36;
+    --input: #1c2024;
+    --sidebar-border: #2b2f36;
   }
 
   [data-density="compact"] {
@@ -215,15 +240,10 @@
     --ui-control-height-lg: 40px;
   }
 
-  /* Console density changes spacing, not font scale or responsive breakpoints.
-   Transparent HUD/native window sizing keeps its existing behavior. */
-  html[data-window-route="console"] {
+  /* Desktop windows change spacing via density tokens, never root font scale. */
+  html[data-window-route="console"],
+  html[data-window-route="combat-details"],
+  html[data-window-route="abyss-values"] {
     font-size: 16px;
-  }
-  html:not([data-window-route="console"])[data-density="compact"] {
-    font-size: 14px;
-  }
-  html:not([data-window-route="console"])[data-density="comfortable"] {
-    font-size: 17px;
   }
 }

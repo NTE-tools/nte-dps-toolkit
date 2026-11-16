@@ -32,6 +32,15 @@ const MAX_RETAINED_TIME_STOP_INTERVALS: usize = MAX_PROJECTED_TIME_STOP_INTERVAL
 const MAX_RETAINED_TIME_STOP_EVENTS: usize = 8_192;
 const TIME_STOP_EVENT_COMPACTION_CHUNK: usize = 1_024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CombatClockTransitionSnapshot {
+    pub sequence: u64,
+    pub timestamp_100ns: u64,
+    pub pause_type_mask: u32,
+    pub reserved_value: i32,
+    pub state_flags: u32,
+}
+
 /// Compact, exportable team DPS snapshot used to predict abyss clear time.
 /// Deliberately holds no packets or per-hit data — only the latest total DPS and
 /// up to 4 members — so the exported file stays tiny.

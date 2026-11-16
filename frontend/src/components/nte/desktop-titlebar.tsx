@@ -131,7 +131,9 @@ function TitleButton({
       className={cn(
         "grid h-full w-10 place-items-center transition-[color,background-color,opacity,transform] active:scale-90 disabled:pointer-events-none disabled:opacity-45 [&_svg]:size-3.5",
         pressed && "bg-muted text-foreground",
-        danger ? "hover:bg-destructive hover:text-white" : "hover:bg-muted",
+        danger
+          ? "hover:bg-destructive hover:text-destructive-foreground"
+          : "hover:bg-muted",
       )}
       aria-label={label}
       aria-pressed={pressed}

@@ -4,7 +4,7 @@ export const MOTION_DURATION = {
   slow: 250,
 } as const;
 
-export function motionIsReduced(): boolean {
+function motionIsReduced(): boolean {
   if (typeof document === "undefined") return true;
   if (document.documentElement.classList.contains("reduce-motion")) return true;
   return (

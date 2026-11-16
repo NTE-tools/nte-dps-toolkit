@@ -1,4 +1,4 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, useState } from "react";
 import {
   JsonForms,
   JsonFormsDispatch,
@@ -193,6 +193,7 @@ const ControlRenderer = withJsonFormsControlProps((props: ControlProps) => {
     input = (
       <NativeSelect
         aria-label={translate(label)}
+        aria-invalid={Boolean(errors) || undefined}
         disabled={!enabled}
         value={selected < 0 ? "" : String(selected)}
         onChange={(event) =>
@@ -216,6 +217,7 @@ const ControlRenderer = withJsonFormsControlProps((props: ControlProps) => {
     input = (
       <Switch
         aria-label={translate(label)}
+        aria-invalid={Boolean(errors) || undefined}
         disabled={
           !enabled ||
           (capturing &&
@@ -238,25 +240,26 @@ const ControlRenderer = withJsonFormsControlProps((props: ControlProps) => {
         }}
       />
     );
+  } else if (schema.type === "number" || schema.type === "integer") {
+    input = (
+      <NumericSchemaInput
+        label={translate(label)}
+        invalid={Boolean(errors)}
+        disabled={!enabled}
+        integer={schema.type === "integer"}
+        value={data}
+        onCommit={(next) => handleChange(path, next)}
+      />
+    );
   } else {
-    const numeric = schema.type === "number" || schema.type === "integer";
     input = (
       <Input
         aria-label={translate(label)}
+        aria-invalid={Boolean(errors) || undefined}
         disabled={!enabled}
-        type={numeric ? "number" : "text"}
-        step={schema.type === "integer" ? 1 : "any"}
+        type="text"
         value={data ?? ""}
-        onChange={(event) =>
-          handleChange(
-            path,
-            numeric
-              ? event.target.value === ""
-                ? undefined
-                : event.target.valueAsNumber
-              : event.target.value,
-          )
-        }
+        onChange={(event) => handleChange(path, event.target.value)}
       />
     );
   }
@@ -288,6 +291,52 @@ const renderers = [
   { tester: rankWith(1, uiTypeIs("Control")), renderer: ControlRenderer },
   { tester: rankWith(1, uiTypeIs("Button")), renderer: ButtonRenderer },
 ];
+
+function NumericSchemaInput({
+  label,
+  invalid,
+  disabled,
+  integer,
+  value,
+  onCommit,
+}: {
+  label: string;
+  invalid: boolean;
+  disabled: boolean;
+  integer: boolean;
+  value: unknown;
+  onCommit: (next: number | undefined) => void;
+}) {
+  const externalText =
+    typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <Input
+      aria-label={label}
+      aria-invalid={invalid || undefined}
+      disabled={disabled}
+      type="number"
+      step={integer ? 1 : "any"}
+      value={draft ?? externalText}
+      onChange={(event) => {
+        const raw = event.target.value;
+        if (raw === "") {
+          setDraft(null);
+          onCommit(undefined);
+          return;
+        }
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) {
+          setDraft(null);
+          onCommit(parsed);
+        } else {
+          setDraft(raw);
+        }
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  );
+}
 
 export function PluginFormRenderer({
   form,

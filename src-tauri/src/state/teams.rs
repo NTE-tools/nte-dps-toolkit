@@ -13,9 +13,7 @@ impl AppState {
     ) -> Result<(Option<TeamDps>, Option<TeamDps>), TeamImportError> {
         self.0
             .team_import
-            .snapshot(|| {
-                self.publish_settings_effects(SettingsMutationEffects::SETTINGS);
-            })
+            .snapshot()
             .map(|teams| (teams.upper, teams.lower))
     }
 
@@ -97,9 +95,7 @@ impl AppState {
         let imported = self
             .0
             .team_import
-            .snapshot(|| {
-                self.publish_settings_effects(SettingsMutationEffects::SETTINGS);
-            })
+            .snapshot()
             .map_err(TeamOperationError::State)?;
         Ok(self.with_main_presented_state(|state| {
             nte_dps_tool::core::team_data::export_team_data(

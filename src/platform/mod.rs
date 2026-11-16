@@ -1,18 +1,19 @@
 //! Windows / OS integration shared by the Rust core and Tauri adapter.
 
-pub mod locale;
-pub mod mods_plugin;
-pub mod network;
-#[cfg(windows)]
-pub mod passthrough_hotkey;
 #[cfg(feature = "desktop")]
+pub mod game_directory;
+pub mod locale;
+pub mod network;
+#[cfg(all(windows, feature = "desktop"))]
+pub mod passthrough_hotkey;
+#[cfg(any(feature = "desktop", feature = "cli"))]
 pub mod toolkit;
 #[cfg(feature = "desktop")]
 pub mod update_http;
 #[cfg(feature = "desktop")]
 pub mod update_install;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "desktop"))]
 pub mod window_style;
 
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "cli"))]
 pub mod capture_pipe;

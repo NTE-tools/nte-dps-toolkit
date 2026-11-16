@@ -7,8 +7,10 @@ use nte_dps_tool::{
     core::{
         CoreError,
         combat_details::{
-            CombatDetailFilter, damage_digit_key_for_hit, follow_up_damage_digit_key_for_hit,
-            reaction_text_key_for_hit,
+            CombatDetailFilter, CombatDetailMetrics, character_detail_metrics,
+            damage_digit_key_for_hit, esper_cycle_reaction, follow_up_damage_digit_key_for_hit,
+            hit_skill_name_ref, is_malice_hit, is_target_hp_residual, is_technical_skill_name,
+            reaction_text_key_for_hit, share_percent, team_detail_metrics,
         },
         live_capture::LiveCapturePhase,
     },
@@ -211,7 +213,7 @@ impl MainDpsDetailSnapshot {
                     attack_type: text_budget.text(summary.attack_type, "-"),
                     hits: summary.hits,
                     damage: summary.damage,
-                    share_percent: percent(summary.damage, metrics.total_output),
+                    share_percent: share_percent(summary.damage, metrics.total_output),
                 })
                 .collect::<Vec<_>>();
             let skill_total_count = if request.character_id.is_some() {
@@ -241,7 +243,7 @@ impl MainDpsDetailSnapshot {
                             ),
                             hits: summary.hits,
                             damage: summary.damage,
-                            share_percent: percent(summary.damage, metrics.total_output),
+                            share_percent: share_percent(summary.damage, metrics.total_output),
                         })
                     })
                     .collect::<Vec<_>>()
@@ -290,14 +292,16 @@ impl MainDpsDetailSnapshot {
                 rows,
             }
         })?;
-        state.main_dps_detail_cache_store(
-            cache_revision,
-            kind,
-            &request,
-            offset,
-            limit,
-            std::sync::Arc::new(snapshot.clone()),
-        );
+        if state.main_dps_stream_revision()? == cache_revision {
+            state.main_dps_detail_cache_store(
+                cache_revision,
+                kind,
+                &request,
+                offset,
+                limit,
+                std::sync::Arc::new(snapshot.clone()),
+            );
+        }
         Ok(snapshot)
     }
 }
@@ -474,6 +478,19 @@ pub(crate) struct MainDpsDetailMetrics {
     pub duration_seconds: f64,
 }
 
+impl From<CombatDetailMetrics> for MainDpsDetailMetrics {
+    fn from(metrics: CombatDetailMetrics) -> Self {
+        Self {
+            total_output: metrics.total_output,
+            dps: metrics.dps,
+            output_count: metrics.output_count,
+            incoming_count: metrics.incoming_count,
+            total_damage_taken: metrics.total_damage_taken,
+            duration_seconds: metrics.duration_seconds,
+        }
+    }
+}
+
 fn detail_metrics(
     source: DetailSource<'_>,
     character_id: Option<u32>,
@@ -488,24 +505,22 @@ fn detail_metrics(
             .unwrap_or_default()
             .for_reaction_damage_policy(separate_reaction_damage);
         let duration = source.character_duration(&row, subtract_time_stop);
-        return MainDpsDetailMetrics {
-            total_output: row.damage,
-            dps: row.damage / duration.max(1.0),
-            output_count: row.hits,
-            incoming_count: row.hits_taken,
-            total_damage_taken: row.damage_taken,
-            duration_seconds: duration,
-        };
+        return character_detail_metrics(
+            source.stats(),
+            character_id,
+            separate_reaction_damage,
+            duration,
+        )
+        .into();
     }
     let duration = source.duration(subtract_time_stop);
-    MainDpsDetailMetrics {
-        total_output: source.total_damage(),
-        dps: source.total_damage() / duration.max(1.0),
-        output_count: source.stats().values().map(|row| row.hits).sum(),
-        incoming_count: source.stats().values().map(|row| row.hits_taken).sum(),
-        total_damage_taken: source.total_damage_taken(),
-        duration_seconds: duration,
-    }
+    team_detail_metrics(
+        source.stats(),
+        source.total_damage(),
+        source.total_damage_taken(),
+        duration,
+    )
+    .into()
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -624,72 +639,8 @@ pub(crate) struct MainDpsSkillSummary {
     pub share_percent: f64,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-struct SkillSummaryAccumulator<'a> {
-    representative: &'a Hit,
-    hits: u64,
-    damage: f64,
-}
-
-#[cfg(test)]
-fn accumulate_skill_summary<'a>(
-    summaries: &mut HashMap<&'a str, SkillSummaryAccumulator<'a>>,
-    hit: &'a Hit,
-) {
-    let id = hit_skill_name_ref(hit);
-    let row = summaries.entry(id).or_insert(SkillSummaryAccumulator {
-        representative: hit,
-        hits: 0,
-        damage: 0.0,
-    });
-    row.hits += 1;
-    row.damage += hit.total_damage();
-}
-
-#[cfg(test)]
-fn skill_summaries_from_accumulators(
-    summaries: HashMap<&str, SkillSummaryAccumulator<'_>>,
-    total_damage: f64,
-    language: Language,
-) -> Vec<MainDpsSkillSummary> {
-    let mut rows = summaries
-        .into_iter()
-        .map(|(id, summary)| MainDpsSkillSummary {
-            id: id.to_owned(),
-            name: skill_summary_display_name(summary.representative, language),
-            category: summary
-                .representative
-                .attack_type
-                .as_deref()
-                .map(|value| translate_attack_type(value, language))
-                .unwrap_or_else(|| i18n::t_for(language, "Uncategorized")),
-            hits: summary.hits,
-            damage: summary.damage,
-            share_percent: percent(summary.damage, total_damage),
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| right.damage.total_cmp(&left.damage));
-    rows
-}
-
-#[cfg(test)]
-fn skill_summaries<'a>(
-    hits: impl IntoIterator<Item = &'a Hit>,
-    total_damage: f64,
-    language: Language,
-) -> Vec<MainDpsSkillSummary> {
-    let mut summaries = HashMap::<&'a str, SkillSummaryAccumulator<'a>>::new();
-    for hit in hits {
-        if !hit.direction.is_incoming() {
-            accumulate_skill_summary(&mut summaries, hit);
-        }
-    }
-    skill_summaries_from_accumulators(summaries, total_damage, language)
-}
-
 fn skill_summary_display_name(hit: &Hit, language: Language) -> String {
-    if hit.attack_type.as_deref() == Some("恶意") {
+    if is_malice_hit(hit) {
         return i18n::t_for(language, "Malice Damage");
     }
     if is_target_hp_residual(hit) {
@@ -723,25 +674,6 @@ fn skill_summary_display_name(hit: &Hit, language: Language) -> String {
         .map(|value| translate_attack_type(value, language))
         .or_else(|| legacy_name.map(str::to_owned))
         .unwrap_or(stable_name)
-}
-
-fn is_technical_skill_name(value: &str) -> bool {
-    value.starts_with("GA_")
-        || value.starts_with("GE_")
-        || value.starts_with("Buff_")
-        || value.contains('_')
-}
-
-fn is_target_hp_residual(hit: &Hit) -> bool {
-    hit.damage_name.as_deref() == Some("Target HP Residual")
-}
-
-fn percent(value: f64, total: f64) -> f64 {
-    if total > 0.0 {
-        value / total * 100.0
-    } else {
-        0.0
-    }
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -904,9 +836,7 @@ fn hit_type_display_text(hit: &Hit, language: Language) -> (String, Option<Strin
     let fixed = match hit.direction {
         HitDirection::Incoming => Some("Incoming"),
         HitDirection::Unknown => Some("Candidate Output"),
-        HitDirection::Outgoing if hit.attack_type.as_deref() == Some("恶意") => {
-            Some("Malice Damage")
-        }
+        HitDirection::Outgoing if is_malice_hit(hit) => Some("Malice Damage"),
         HitDirection::Outgoing if is_target_hp_residual(hit) => Some("Target HP Residual"),
         HitDirection::Outgoing => None,
     };
@@ -956,7 +886,7 @@ fn translate_attack_type(value: &str, language: Language) -> String {
     if let Some(key) = nte_dps_tool::core::skills::skill_label_translation_key(value) {
         return i18n::t_for(language, key);
     }
-    if let Some(reaction) = value.strip_prefix("环合·")
+    if let Some(reaction) = esper_cycle_reaction(value)
         && let Some(key) = nte_dps_tool::core::skills::skill_label_translation_key(reaction)
     {
         return i18n::tf_for(language, "Esper Cycle: {}", &[&i18n::t_for(language, key)]);
@@ -966,19 +896,6 @@ fn translate_attack_type(value: &str, language: Language) -> String {
 
 fn hit_skill_name(hit: &Hit) -> String {
     hit_skill_name_ref(hit).to_owned()
-}
-
-fn hit_skill_name_ref(hit: &Hit) -> &str {
-    if hit.attack_type.as_deref() == Some("恶意") {
-        return "恶意";
-    }
-    hit.damage_component
-        .as_deref()
-        .or(hit.ability_name.as_deref())
-        .or(hit.gameplay_effect_name.as_deref())
-        .or(hit.damage_name.as_deref())
-        .or(hit.attack_type.as_deref())
-        .unwrap_or("Unmapped Skill")
 }
 
 fn localized_character_name(
@@ -1076,7 +993,7 @@ pub(crate) fn find_hit_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{contract::stream::MAX_STREAM_DELIVERY_BYTES, state::MainDpsDetailRequest};
+    use crate::{contract::stream::tests::MAX_STREAM_DELIVERY_BYTES, state::MainDpsDetailRequest};
     use nte_dps_tool::engine::model::{HitCharacterSource, HitDirection};
 
     fn skill_hit(
@@ -1691,6 +1608,7 @@ mod tests {
         let (_, warning) = ability_names::init(Language::SimplifiedChinese);
         assert_eq!(warning, None);
         let ultimate = skill_hit(100.0, Some("GA_Nanally_UltraSkill"), None, "Q技能");
+        let character_id = ultimate.char_id;
         let mut awakening = skill_hit(
             20.0,
             None,
@@ -1700,9 +1618,43 @@ mod tests {
         awakening.gameplay_effect_name = Some("GE_Nanally010_Lv3_Damage".to_owned());
         awakening.damage_component = Some("Awakening Follow-up Attack".to_owned());
         let break_damage = skill_hit(10.0, None, Some("Buff_Tenacity_damage"), "倾陷伤害");
-        let hits = [&ultimate, &awakening, &break_damage];
+        let mut combat = CombatState::default();
+        combat.push_hit(ultimate);
+        combat.push_hit(awakening);
+        combat.push_hit(break_damage);
 
-        let summaries = skill_summaries(hits.iter().copied(), 130.0, Language::SimplifiedChinese);
+        let config = nte_dps_tool::storage::config::UiConfig {
+            language: Language::SimplifiedChinese,
+            ..Default::default()
+        };
+        let state = AppState::new(
+            config,
+            nte_dps_tool::core::live_capture::LiveCaptureService::new(
+                nte_dps_tool::core::live_capture::LiveCaptureResources::default(),
+            ),
+        );
+        state
+            .set_main_dps_detail_request(
+                MainDpsDetailKind::Character,
+                MainDpsDetailRequest {
+                    character_id: Some(character_id),
+                    ..Default::default()
+                },
+            )
+            .expect("set character detail request");
+        state.restore_live_state_for_test(
+            combat,
+            nte_dps_tool::engine::model::CaptureQualitySource::Live,
+        );
+
+        let snapshot = MainDpsDetailSnapshot::from_state(
+            &state,
+            MainDpsDetailKind::Character,
+            0,
+            MAIN_DPS_DETAIL_DEFAULT_LIMIT,
+        )
+        .expect("character detail snapshot");
+        let summaries = &snapshot.skills;
         let ultimate = summaries
             .iter()
             .find(|summary| summary.id == "GA_Nanally_UltraSkill")

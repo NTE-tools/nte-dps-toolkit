@@ -1,4 +1,4 @@
-export type AsyncCleanup = () => void;
+type AsyncCleanup = () => void;
 
 export function cleanupAsyncRegistration(
   registration: Promise<AsyncCleanup>,

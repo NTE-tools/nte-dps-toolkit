@@ -1,3 +1,4 @@
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import {
   PageHeader,
   PageTitle,
@@ -14,11 +15,9 @@ import {
   RefreshCw,
   Sparkles,
   UsersRound,
-  X,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
 
 import {
   Alert,
@@ -203,7 +202,7 @@ function SkillsReady({
       </div>
 
       <div className="skills-workspace grid min-h-[30rem] flex-1 overflow-hidden rounded-xl border bg-card min-[1040px]:grid-cols-[15rem_minmax(0,1fr)]">
-        <aside className="border-b border-border/70 p-2.5 min-[1040px]:border-r min-[1040px]:border-b-0">
+        <aside className="skills-sidebar border-b border-border/70 p-2.5 min-[1040px]:border-r min-[1040px]:border-b-0">
           <div className="mb-2 flex items-center justify-between gap-3 px-1.5">
             <h2 className="text-sm font-semibold">{t("Character")}</h2>
             <span className="font-mono text-xs text-muted-foreground">
@@ -405,30 +404,13 @@ function SkillsStreamError({
   error: CommandError;
   onDismiss: () => void;
 }) {
-  return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-4 z-[100] flex justify-center px-4">
-      <Alert
-        className="pointer-events-auto w-full max-w-lg bg-background pr-10 shadow-xl"
-        variant="destructive"
-      >
-        <AlertTriangle aria-hidden="true" />
-        <AlertTitle>{t("Skills stream interrupted")}</AlertTitle>
-        <AlertDescription>
-          {tf(error.messageKey, error.messageArguments)}
-        </AlertDescription>
-        <AlertAction>
-          <Button
-            aria-label={t("Dismiss")}
-            size="icon-xs"
-            variant="ghost"
-            onClick={onDismiss}
-          >
-            <X aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
-    </div>,
-    document.body,
+  return (
+    <FloatingActionNotice
+      status="error"
+      message={t("Skills stream interrupted")}
+      detail={tf(error.messageKey, error.messageArguments)}
+      onDismiss={onDismiss}
+    />
   );
 }
 
@@ -454,19 +436,18 @@ function CharacterButton({
           : "hover:bg-muted/70",
       )}
     >
-      <span
-        className="h-9 w-1 shrink-0 rounded-full"
-        style={{ backgroundColor: character.color }}
-      />
       {avatar ? (
         <img
           alt=""
-          className="size-9 shrink-0 rounded-md object-cover"
+          className="size-9 shrink-0 rounded-lg object-cover"
           draggable={false}
           src={avatar}
         />
       ) : (
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted font-semibold">
+        <span
+          className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted font-semibold"
+          style={{ color: character.color }}
+        >
           {character.name.slice(0, 1)}
         </span>
       )}
@@ -517,10 +498,6 @@ function SkillRow({
             backgroundColor: character.color,
             width: `${Math.max(0.75, share * 100)}%`,
           }}
-        />
-        <span
-          className="absolute inset-y-0 left-0 w-0.5"
-          style={{ backgroundColor: character.color }}
         />
         <div className="grid min-w-0 items-center gap-x-4 gap-y-1 min-[680px]:grid-cols-[minmax(0,1fr)_auto_auto]">
           <div className="min-w-0">

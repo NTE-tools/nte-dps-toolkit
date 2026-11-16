@@ -121,6 +121,7 @@ function sameDetailView(
 ): boolean {
   return (
     left.kind === right.kind &&
+    left.abyssHalf === right.abyssHalf &&
     left.characterId === right.characterId &&
     left.filter === right.filter &&
     left.qteType === right.qteType &&

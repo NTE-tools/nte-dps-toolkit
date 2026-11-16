@@ -109,6 +109,18 @@ pub(crate) fn publish_notice_best_effort(
     }
 }
 
+pub(crate) fn publish_reset_notice(app: &AppHandle, state: &AppState, undo_token: Option<String>) {
+    let message_key = if undo_token.is_some() {
+        "Session reset. Use Undo within 5 seconds."
+    } else {
+        "Stats reset"
+    };
+    state.publish_island_notice(IslandTone::Success, message_key, Vec::new(), undo_token);
+    if let Err(error) = show_notice(app, state) {
+        log::warn!("show reset notification island failed: {error:?}");
+    }
+}
+
 fn island_physical_size(scale: f64) -> PhysicalSize<u32> {
     PhysicalSize::new(
         (ISLAND_LOGICAL_WIDTH * scale).round() as u32,

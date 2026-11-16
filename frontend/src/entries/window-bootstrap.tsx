@@ -20,7 +20,17 @@ export function renderWindow(
 ): void {
   document.documentElement.dataset.windowRoute = options.windowRoute;
   bootstrapSettingsPresentation();
-  const suppressBrowserContextMenu = (event: Event) => event.preventDefault();
+  const suppressBrowserContextMenu = (event: Event) => {
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    ) {
+      return;
+    }
+    event.preventDefault();
+  };
   window.addEventListener("contextmenu", suppressBrowserContextMenu, true);
   if (import.meta.hot) {
     import.meta.hot.dispose(() =>

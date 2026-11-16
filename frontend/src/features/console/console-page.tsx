@@ -1,9 +1,16 @@
-import { Search, X } from "lucide-react";
-import { Activity, useCallback, useEffect, useState } from "react";
+import { Search } from "lucide-react";
+import {
+  Activity,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 import { flushSync } from "react-dom";
 
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import { DesktopTitlebar } from "@/components/nte/desktop-titlebar";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogBackdrop,
@@ -14,17 +21,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { CharacterDataPage } from "@/features/character-data/character-data-page";
-import { DiagnosticsPage } from "@/features/diagnostics/diagnostics-page";
-import { EmptyCurtainPage } from "@/features/empty-curtain/empty-curtain-page";
-import { EncryptedIniPage } from "@/features/encrypted-ini/encrypted-ini-page";
-import { HistoryPage } from "@/features/history/history-page";
-import { ModStudioWorkspace } from "@/features/mod-studio/mod-studio-page";
-import { PacketsPage } from "@/features/packets/packets-page";
-import { SettingsPage } from "@/features/settings/settings-page";
-import { ShortcutsPage } from "@/features/shortcuts/shortcuts-page";
-import { SkillsPage } from "@/features/skills/skills-page";
-import { TimelinePage } from "@/features/timeline/timeline-page";
 import { cleanupAsyncRegistration } from "@/lib/async-cleanup";
 import { t, useFrontendLanguage } from "@/lib/i18n";
 import { startMotionViewTransition } from "@/lib/motion";
@@ -42,6 +38,7 @@ import { subscribeConsoleNavigate } from "@/lib/tauri/window-events";
 import { ConsoleCommandPalette } from "./console-command-palette";
 import type { ConsoleCommandAction } from "./console-command-palette-model";
 import {
+  CONSOLE_PAGE_IDS,
   DEFAULT_CONSOLE_PAGE,
   adjacentConsolePage,
   consolePageActivityMode,
@@ -56,10 +53,113 @@ import {
 } from "./console-navigation";
 import { ConsoleSidebar } from "./console-sidebar";
 
+const CharacterDataPage = lazy(() =>
+  import("@/features/character-data/character-data-page").then((module) => ({
+    default: module.CharacterDataPage,
+  })),
+);
+const DiagnosticsPage = lazy(() =>
+  import("@/features/diagnostics/diagnostics-page").then((module) => ({
+    default: module.DiagnosticsPage,
+  })),
+);
+const EmptyCurtainPage = lazy(() =>
+  import("@/features/empty-curtain/empty-curtain-page").then((module) => ({
+    default: module.EmptyCurtainPage,
+  })),
+);
+const EncryptedIniPage = lazy(() =>
+  import("@/features/encrypted-ini/encrypted-ini-page").then((module) => ({
+    default: module.EncryptedIniPage,
+  })),
+);
+const HistoryPage = lazy(() =>
+  import("@/features/history/history-page").then((module) => ({
+    default: module.HistoryPage,
+  })),
+);
+const ModStudioWorkspace = lazy(() =>
+  import("@/features/mod-studio/mod-studio-page").then((module) => ({
+    default: module.ModStudioWorkspace,
+  })),
+);
+const PacketsPage = lazy(() =>
+  import("@/features/packets/packets-page").then((module) => ({
+    default: module.PacketsPage,
+  })),
+);
+const SettingsPage = lazy(() =>
+  import("@/features/settings/settings-page").then((module) => ({
+    default: module.SettingsPage,
+  })),
+);
+const ShortcutsPage = lazy(() =>
+  import("@/features/shortcuts/shortcuts-page").then((module) => ({
+    default: module.ShortcutsPage,
+  })),
+);
+const SkillsPage = lazy(() =>
+  import("@/features/skills/skills-page").then((module) => ({
+    default: module.SkillsPage,
+  })),
+);
+const TimelinePage = lazy(() =>
+  import("@/features/timeline/timeline-page").then((module) => ({
+    default: module.TimelinePage,
+  })),
+);
+
+function ConsolePageFallback() {
+  return (
+    <div
+      className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      {t("Loading...")}
+    </div>
+  );
+}
+
+function renderConsolePage(
+  page: ConsolePageId,
+  navigateTo: (next: ConsolePageId) => void,
+) {
+  switch (page) {
+    case "timeline":
+      return <TimelinePage />;
+    case "skills":
+      return <SkillsPage />;
+    case "empty-curtain":
+      return <EmptyCurtainPage />;
+    case "character-data":
+      return (
+        <CharacterDataPage onOpenModStudio={() => navigateTo("mod-studio")} />
+      );
+    case "encrypted-ini":
+      return <EncryptedIniPage />;
+    case "history":
+      return <HistoryPage />;
+    case "packets":
+      return <PacketsPage />;
+    case "settings":
+      return <SettingsPage />;
+    case "shortcuts":
+      return <ShortcutsPage />;
+    case "diagnostics":
+      return <DiagnosticsPage />;
+    case "mod-studio":
+      return <ModStudioWorkspace />;
+  }
+}
+
 export function ConsolePage() {
   useFrontendLanguage();
   const [activePage, setActivePage] =
     useState<ConsolePageId>(DEFAULT_CONSOLE_PAGE);
+  const [visitedPages, setVisitedPages] = useState<ReadonlySet<ConsolePageId>>(
+    () => new Set([DEFAULT_CONSOLE_PAGE]),
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     readConsoleSidebarCollapsed,
   );
@@ -77,7 +177,12 @@ export function ConsolePage() {
     (next: ConsolePageId) => {
       if (next === activePage) return;
       startMotionViewTransition(() => {
-        flushSync(() => setActivePage(next));
+        flushSync(() => {
+          setVisitedPages((current) =>
+            current.has(next) ? current : new Set(current).add(next),
+          );
+          setActivePage(next);
+        });
       });
     },
     [activePage],
@@ -281,153 +386,31 @@ export function ConsolePage() {
           onToggle={toggleSidebar}
         />
         {commandError !== null && (
-          <Alert
-            className="ui-motion-alert absolute top-2 right-3 left-[calc(var(--spacing)*56)] z-20 shadow-md"
-            variant="destructive"
-          >
-            <AlertDescription>{commandError}</AlertDescription>
-            <button
-              aria-label={t("Close")}
-              className="absolute top-1.5 right-1.5 grid size-7 place-items-center rounded-md hover:bg-muted"
-              onClick={() => setCommandError(null)}
-              type="button"
-            >
-              <X className="size-3.5" aria-hidden="true" />
-            </button>
-          </Alert>
+          <FloatingActionNotice
+            status="error"
+            message={commandError}
+            onDismiss={() => setCommandError(null)}
+          />
         )}
-        <Activity
-          name="console-timeline"
-          mode={consolePageActivityMode(activePage, "timeline")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "timeline"}
-            data-page="timeline"
-          >
-            <TimelinePage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-skills"
-          mode={consolePageActivityMode(activePage, "skills")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "skills"}
-            data-page="skills"
-          >
-            <SkillsPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-empty-curtain"
-          mode={consolePageActivityMode(activePage, "empty-curtain")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "empty-curtain"}
-            data-page="empty-curtain"
-          >
-            <EmptyCurtainPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-character-data"
-          mode={consolePageActivityMode(activePage, "character-data")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "character-data"}
-            data-page="character-data"
-          >
-            <CharacterDataPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-encrypted-ini"
-          mode={consolePageActivityMode(activePage, "encrypted-ini")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "encrypted-ini"}
-            data-page="encrypted-ini"
-          >
-            <EncryptedIniPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-history"
-          mode={consolePageActivityMode(activePage, "history")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "history"}
-            data-page="history"
-          >
-            <HistoryPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-packets"
-          mode={consolePageActivityMode(activePage, "packets")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "packets"}
-            data-page="packets"
-          >
-            <PacketsPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-settings"
-          mode={consolePageActivityMode(activePage, "settings")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "settings"}
-            data-page="settings"
-          >
-            <SettingsPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-shortcuts"
-          mode={consolePageActivityMode(activePage, "shortcuts")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "shortcuts"}
-            data-page="shortcuts"
-          >
-            <ShortcutsPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-diagnostics"
-          mode={consolePageActivityMode(activePage, "diagnostics")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "diagnostics"}
-            data-page="diagnostics"
-          >
-            <DiagnosticsPage />
-          </div>
-        </Activity>
-        <Activity
-          name="console-mod-studio"
-          mode={consolePageActivityMode(activePage, "mod-studio")}
-        >
-          <div
-            className="console-page-stage flex min-h-0 min-w-0 flex-1"
-            data-active={activePage === "mod-studio"}
-            data-page="mod-studio"
-          >
-            <ModStudioWorkspace />
-          </div>
-        </Activity>
+        {CONSOLE_PAGE_IDS.map((page) =>
+          visitedPages.has(page) ? (
+            <Activity
+              key={page}
+              name={`console-${page}`}
+              mode={consolePageActivityMode(activePage, page)}
+            >
+              <div
+                className="console-page-stage flex min-h-0 min-w-0 flex-1"
+                data-active={activePage === page}
+                data-page={page}
+              >
+                <Suspense fallback={<ConsolePageFallback />}>
+                  {renderConsolePage(page, navigateTo)}
+                </Suspense>
+              </div>
+            </Activity>
+          ) : null,
+        )}
       </main>
       <ConsoleCommandPalette
         onExecute={executeCommand}
@@ -443,17 +426,17 @@ export function ConsolePage() {
         >
           <AlertDialogPortal>
             <AlertDialogBackdrop className="z-[80]" />
-            <AlertDialogPopup className="ui-motion-dialog top-1/2 left-1/2 z-[81] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-background p-5 shadow-2xl">
-              <AlertDialogTitle className="text-sm">
-                {t("Confirm Import")}
-              </AlertDialogTitle>
+            <AlertDialogPopup className="top-1/2 left-1/2 z-[81] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-background p-5 shadow-xl">
+              <AlertDialogTitle>{t("Confirm Import")}</AlertDialogTitle>
               <AlertDialogDescription className="mt-2">
                 {t(
                   "Importing a replay stops the current task and clears existing stats.",
                 )}
               </AlertDialogDescription>
               <div className="mt-5 flex justify-end gap-2">
-                <AlertDialogClose render={<Button variant="outline" />}>
+                <AlertDialogClose
+                  render={<Button variant="outline" autoFocus />}
+                >
                   {t("Cancel")}
                 </AlertDialogClose>
                 <Button onClick={() => void confirmReplayImport()}>

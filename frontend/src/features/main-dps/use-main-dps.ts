@@ -6,7 +6,7 @@ import { type CommandError, toCommandError } from "@/lib/tauri/command-error";
 
 import { isGenerationNewer } from "./main-dps-model";
 
-export interface MainDpsActionNotice {
+interface MainDpsActionNotice {
   id: number;
   action: string;
   status: "pending" | "success";
@@ -30,15 +30,28 @@ export function useMainDps() {
   }, []);
 
   useEffect(() => {
+    let active = true;
     mounted.current = true;
     void mainDpsClient
       .getSnapshot()
-      .then(apply)
-      .catch((value) => setError(toCommandError(value)));
-    const unsubscribe = mainDpsClient.subscribe(apply, setError);
+      .then((next) => {
+        if (active) apply(next);
+      })
+      .catch((value) => {
+        if (active) setError(toCommandError(value));
+      });
+    const unsubscribe = mainDpsClient.subscribe(
+      (next) => {
+        if (active) apply(next);
+      },
+      (err) => {
+        if (active) setError(err);
+      },
+    );
     return () => {
+      active = false;
       mounted.current = false;
-      void unsubscribe();
+      unsubscribe();
     };
   }, [apply]);
 

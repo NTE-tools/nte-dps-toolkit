@@ -8,31 +8,21 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 use semver::Version;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use zip::ZipArchive;
 
 use crate::core::update::{
-    AvailableComponentUpdate, InstalledComponentVersions, UPDATE_HEALTH_MARKER_ENV,
-    UPDATE_SCHEMA_VERSION, UpdateComponent, UpdateTransaction, safe_managed_release_path,
+    AvailableComponentUpdate, UPDATE_HEALTH_MARKER_ENV, UPDATE_SCHEMA_VERSION, UpdateComponent,
+    UpdateTransaction, safe_managed_release_path,
 };
-use crate::platform::{mods_plugin, update_http, update_install};
+use crate::platform::update_http;
 use crate::storage::io_util::atomic_write_text;
 use crate::storage::paths;
 
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 const MAX_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024;
 const UPDATE_ROOT_DIRECTORY: &str = ".update";
-const COMPONENT_STATE_SCHEMA: u32 = 1;
-const MAX_COMPONENT_STATE_BYTES: u64 = 64 * 1024;
-const MAX_MODS_PLUGIN_BYTES: u64 = 64 * 1024 * 1024;
-const MODS_PLUGIN_PATH: &str = "plugins/dwmapi.dll";
-const MODS_PLUGIN_BASELINE_VERSION_PATH: &str = "plugins/mods-plugin.version";
-const MODS_PLUGIN_STATE_PATH: &str = "plugins/mods-plugin.state.json";
-const LEGACY_MODS_PLUGIN_BASELINE_VERSION_PATH: &str = "plugins/equipment-plugin.version";
-const LEGACY_MODS_PLUGIN_STATE_PATH: &str = "plugins/equipment-plugin.state.json";
-const OLDER_COMPONENT_STATE_PATH: &str = ".update/components.json";
 const COMPLETED_UPDATE_CLEANUP_DELAY: Duration = Duration::from_secs(1);
 const COMPLETED_UPDATE_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const COMPLETED_UPDATE_CLEANUP_ATTEMPTS: usize = 40;
@@ -44,26 +34,18 @@ pub enum PreparedUpdate {
         transaction_path: PathBuf,
         updater_path: PathBuf,
     },
-    ModsPlugin {
-        version: Version,
-        transaction_id: String,
-        staging_dir: PathBuf,
-        plugin_path: PathBuf,
-        plugin_sha256: [u8; 32],
-    },
 }
 
 impl PreparedUpdate {
     pub const fn component(&self) -> UpdateComponent {
         match self {
             Self::App { .. } => UpdateComponent::App,
-            Self::ModsPlugin { .. } => UpdateComponent::ModsPlugin,
         }
     }
 
     pub fn version(&self) -> &Version {
         match self {
-            Self::App { version, .. } | Self::ModsPlugin { version, .. } => version,
+            Self::App { version, .. } => version,
         }
     }
 }
@@ -79,9 +61,6 @@ pub enum PrepareUpdateError {
     ArchiveTooLarge,
     MissingApplication,
     MissingUpdater,
-    MissingModsPlugin,
-    UnexpectedPluginArchiveContents,
-    InvalidModsPluginSize,
     File(io::Error),
     Transaction(String),
 }
@@ -113,15 +92,6 @@ impl fmt::Display for PrepareUpdateError {
             Self::MissingUpdater => {
                 formatter.write_str("update archive is missing nte-updater.exe")
             }
-            Self::MissingModsPlugin => {
-                formatter.write_str("plugin update archive is missing plugins/dwmapi.dll")
-            }
-            Self::UnexpectedPluginArchiveContents => {
-                formatter.write_str("plugin update archive contains unsupported files")
-            }
-            Self::InvalidModsPluginSize => {
-                formatter.write_str("Mod loader file has an invalid size")
-            }
             Self::File(error) => write!(formatter, "update file operation failed: {error}"),
             Self::Transaction(error) => write!(formatter, "update transaction is invalid: {error}"),
         }
@@ -130,86 +100,12 @@ impl fmt::Display for PrepareUpdateError {
 
 impl std::error::Error for PrepareUpdateError {}
 
-#[derive(Debug)]
-pub enum ComponentVersionError {
-    File(io::Error),
-    TooLarge,
-    Invalid(String),
-}
-
-impl fmt::Display for ComponentVersionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::File(error) => write!(formatter, "component state file failed: {error}"),
-            Self::TooLarge => formatter.write_str("component state file exceeds the size limit"),
-            Self::Invalid(error) => write!(formatter, "component state file is invalid: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ComponentVersionError {}
-
-#[derive(Debug)]
-pub enum InstallPluginUpdateError {
-    WrongComponent,
-    HashMismatch,
-    File(io::Error),
-    State(String),
-    Deployment(mods_plugin::ModsPluginDeploymentError),
-    Rollback(String),
-}
-
-impl fmt::Display for InstallPluginUpdateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WrongComponent => formatter.write_str("prepared update is not a plugin update"),
-            Self::HashMismatch => formatter.write_str("prepared Mod loader hash does not match"),
-            Self::File(error) => write!(formatter, "plugin update file operation failed: {error}"),
-            Self::State(error) => write!(formatter, "plugin update state failed: {error}"),
-            Self::Deployment(error) => write!(formatter, "{error}"),
-            Self::Rollback(error) => write!(formatter, "plugin update rollback failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for InstallPluginUpdateError {}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ComponentStateDocument {
-    schema: u32,
-    #[serde(default, alias = "equipment_plugin")]
-    mods_plugin: Option<ComponentStateEntry>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ComponentStateEntry {
-    version: String,
-    sha256: String,
-}
-
-pub fn installed_component_versions(
-    app: Version,
-) -> Result<InstalledComponentVersions, ComponentVersionError> {
-    let install_dir = paths::software_dir();
-    let plugin_path = install_dir.join(MODS_PLUGIN_PATH);
-    let mods_plugin = if plugin_path.is_file() {
-        match read_recorded_plugin_version(&install_dir, &plugin_path)? {
-            Some(version) => Some(version),
-            None => read_plugin_baseline_version(&install_dir)?.or(Some(app.clone())),
-        }
-    } else {
-        None
-    };
-    Ok(InstalledComponentVersions { app, mods_plugin })
-}
-
 pub fn prepare_update(
     update: &AvailableComponentUpdate,
     progress: impl FnMut(u64, u64),
 ) -> Result<PreparedUpdate, PrepareUpdateError> {
     match update.component {
         UpdateComponent::App => prepare_app_update(update, progress),
-        UpdateComponent::ModsPlugin => prepare_mods_plugin_update(update, progress),
     }
 }
 
@@ -287,288 +183,18 @@ fn prepare_app_update(
     })
 }
 
-fn prepare_mods_plugin_update(
-    update: &AvailableComponentUpdate,
-    progress: impl FnMut(u64, u64),
-) -> Result<PreparedUpdate, PrepareUpdateError> {
-    let install_dir = paths::software_dir()
-        .canonicalize()
-        .map_err(PrepareUpdateError::File)?;
-    let update_root = install_dir.join(UPDATE_ROOT_DIRECTORY);
-    let hash_hex = hex::encode(update.artifact_sha256);
-    let transaction_id = format!("plugin-{}-{}", update.version, &hash_hex[..12]);
-    let package_path = update_root
-        .join("downloads")
-        .join(format!("{transaction_id}.zip.part"));
-    update_http::download_file(
-        &update.artifact_url,
-        &package_path,
-        update.artifact_size,
-        progress,
-    )
-    .map_err(PrepareUpdateError::Download)?;
-    if sha256_file(&package_path)? != update.artifact_sha256 {
-        let _ = fs::remove_file(&package_path);
-        return Err(PrepareUpdateError::HashMismatch);
-    }
-
-    let staging_dir = update_root.join("staging").join(&transaction_id);
-    if staging_dir.exists() {
-        fs::remove_dir_all(&staging_dir).map_err(PrepareUpdateError::File)?;
-    }
-    fs::create_dir_all(&staging_dir).map_err(PrepareUpdateError::File)?;
-    let files = extract_release_archive(&package_path, &staging_dir)?;
-    let plugin_relative = Path::new(MODS_PLUGIN_PATH);
-    if !files.iter().any(|path| path == plugin_relative) {
-        return Err(PrepareUpdateError::MissingModsPlugin);
-    }
-    if files.len() != 1 {
-        return Err(PrepareUpdateError::UnexpectedPluginArchiveContents);
-    }
-    let plugin_path = staging_dir.join(plugin_relative);
-    let plugin_size = plugin_path
-        .metadata()
-        .map_err(PrepareUpdateError::File)?
-        .len();
-    if plugin_size == 0 || plugin_size > MAX_MODS_PLUGIN_BYTES {
-        return Err(PrepareUpdateError::InvalidModsPluginSize);
-    }
-    let plugin_sha256 = sha256_file(&plugin_path)?;
-    let _ = fs::remove_file(package_path);
-    Ok(PreparedUpdate::ModsPlugin {
-        version: update.version.clone(),
-        transaction_id,
-        staging_dir,
-        plugin_path,
-        plugin_sha256,
-    })
-}
-
 pub fn launch_prepared_app_update(update: &PreparedUpdate) -> io::Result<Child> {
     let PreparedUpdate::App {
         transaction_path,
         updater_path,
         ..
-    } = update
-    else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "prepared update is not an application update",
-        ));
-    };
+    } = update;
     let mut command = Command::new(updater_path);
     command
         .arg("--apply")
         .arg(transaction_path)
         .creation_flags(CREATE_NO_WINDOW);
     command.spawn()
-}
-
-pub fn install_prepared_plugin_update(
-    update: &PreparedUpdate,
-) -> Result<(), InstallPluginUpdateError> {
-    let PreparedUpdate::ModsPlugin {
-        version,
-        transaction_id,
-        staging_dir,
-        plugin_path,
-        plugin_sha256,
-    } = update
-    else {
-        return Err(InstallPluginUpdateError::WrongComponent);
-    };
-    let install_dir = paths::software_dir()
-        .canonicalize()
-        .map_err(InstallPluginUpdateError::File)?;
-    if sha256_file_io(plugin_path).map_err(InstallPluginUpdateError::File)? != *plugin_sha256 {
-        return Err(InstallPluginUpdateError::HashMismatch);
-    }
-    let plugin = fs::read(plugin_path).map_err(InstallPluginUpdateError::File)?;
-    let target = install_dir.join(MODS_PLUGIN_PATH);
-    let backup_root = install_dir
-        .join(UPDATE_ROOT_DIRECTORY)
-        .join("backup")
-        .join(transaction_id);
-    let backup = backup_root.join(MODS_PLUGIN_PATH);
-    let previous_state = read_component_state_text(&install_dir)?;
-    let target_existed = target.is_file();
-    if target_existed {
-        copy_synced(&target, &backup).map_err(InstallPluginUpdateError::File)?;
-    }
-
-    write_plugin_component_state(&install_dir, version, *plugin_sha256)?;
-    if let Err(error) =
-        update_install::replace_file_from_source(plugin_path, &target, transaction_id)
-    {
-        restore_component_state(&install_dir, previous_state.as_deref())?;
-        return Err(InstallPluginUpdateError::File(error));
-    }
-    if let Err(error) = mods_plugin::refresh_installed_mods_plugins(&plugin) {
-        rollback_plugin_source(&target, &backup, target_existed, transaction_id)?;
-        restore_component_state(&install_dir, previous_state.as_deref())?;
-        return Err(InstallPluginUpdateError::Deployment(error));
-    }
-    let _ = fs::remove_dir_all(backup_root);
-    let _ = fs::remove_dir_all(staging_dir);
-    cleanup_completed_update_files(&install_dir);
-    Ok(())
-}
-
-fn read_plugin_baseline_version(
-    install_dir: &Path,
-) -> Result<Option<Version>, ComponentVersionError> {
-    let text = match read_limited_text(&install_dir.join(MODS_PLUGIN_BASELINE_VERSION_PATH), 128)? {
-        Some(text) => text,
-        None => {
-            let legacy_path = install_dir.join(LEGACY_MODS_PLUGIN_BASELINE_VERSION_PATH);
-            let Some(text) = read_limited_text(&legacy_path, 128)? else {
-                return Ok(None);
-            };
-            text
-        }
-    };
-    Version::parse(text.trim())
-        .map(Some)
-        .map_err(|error| ComponentVersionError::Invalid(error.to_string()))
-}
-
-fn read_recorded_plugin_version(
-    install_dir: &Path,
-    plugin_path: &Path,
-) -> Result<Option<Version>, ComponentVersionError> {
-    let Some(text) = read_component_state_text_raw(install_dir)? else {
-        return Ok(None);
-    };
-    let state = serde_json::from_str::<ComponentStateDocument>(&text)
-        .map_err(|error| ComponentVersionError::Invalid(error.to_string()))?;
-    if state.schema != COMPONENT_STATE_SCHEMA {
-        return Err(ComponentVersionError::Invalid(format!(
-            "unsupported schema {}",
-            state.schema
-        )));
-    }
-    let Some(plugin) = state.mods_plugin else {
-        return Ok(None);
-    };
-    let version = Version::parse(&plugin.version)
-        .map_err(|error| ComponentVersionError::Invalid(error.to_string()))?;
-    let expected_hash = decode_sha256(&plugin.sha256)?;
-    let actual_hash = sha256_file_io(plugin_path).map_err(ComponentVersionError::File)?;
-    Ok((actual_hash == expected_hash).then_some(version))
-}
-
-fn read_limited_text(
-    path: &Path,
-    maximum_bytes: u64,
-) -> Result<Option<String>, ComponentVersionError> {
-    let metadata = match path.metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(ComponentVersionError::File(error)),
-    };
-    if metadata.len() > maximum_bytes {
-        return Err(ComponentVersionError::TooLarge);
-    }
-    fs::read_to_string(path)
-        .map(Some)
-        .map_err(ComponentVersionError::File)
-}
-
-fn decode_sha256(value: &str) -> Result<[u8; 32], ComponentVersionError> {
-    hex::decode(value.trim())
-        .map_err(|error| ComponentVersionError::Invalid(error.to_string()))?
-        .try_into()
-        .map_err(|_| ComponentVersionError::Invalid("SHA-256 must be 32 bytes".to_owned()))
-}
-
-fn component_state_path(install_dir: &Path) -> PathBuf {
-    install_dir.join(MODS_PLUGIN_STATE_PATH)
-}
-
-fn legacy_mods_plugin_state_path(install_dir: &Path) -> PathBuf {
-    install_dir.join(LEGACY_MODS_PLUGIN_STATE_PATH)
-}
-
-fn older_component_state_path(install_dir: &Path) -> PathBuf {
-    install_dir.join(OLDER_COMPONENT_STATE_PATH)
-}
-
-fn read_component_state_text_raw(
-    install_dir: &Path,
-) -> Result<Option<String>, ComponentVersionError> {
-    for path in [
-        component_state_path(install_dir),
-        legacy_mods_plugin_state_path(install_dir),
-        older_component_state_path(install_dir),
-    ] {
-        if let Some(text) = read_limited_text(&path, MAX_COMPONENT_STATE_BYTES)? {
-            return Ok(Some(text));
-        }
-    }
-    Ok(None)
-}
-
-fn read_component_state_text(
-    install_dir: &Path,
-) -> Result<Option<String>, InstallPluginUpdateError> {
-    read_component_state_text_raw(install_dir)
-        .map_err(|error| InstallPluginUpdateError::State(error.to_string()))
-}
-
-fn write_plugin_component_state(
-    install_dir: &Path,
-    version: &Version,
-    sha256: [u8; 32],
-) -> Result<(), InstallPluginUpdateError> {
-    let document = ComponentStateDocument {
-        schema: COMPONENT_STATE_SCHEMA,
-        mods_plugin: Some(ComponentStateEntry {
-            version: version.to_string(),
-            sha256: hex::encode(sha256),
-        }),
-    };
-    let text = serde_json::to_string_pretty(&document)
-        .map_err(|error| InstallPluginUpdateError::State(error.to_string()))?;
-    atomic_write_text(&component_state_path(install_dir), &text)
-        .map_err(InstallPluginUpdateError::State)
-}
-
-fn restore_component_state(
-    install_dir: &Path,
-    previous: Option<&str>,
-) -> Result<(), InstallPluginUpdateError> {
-    let path = component_state_path(install_dir);
-    if let Some(previous) = previous {
-        atomic_write_text(&path, previous).map_err(InstallPluginUpdateError::State)
-    } else {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(InstallPluginUpdateError::File(error)),
-        }
-    }
-}
-
-fn rollback_plugin_source(
-    target: &Path,
-    backup: &Path,
-    target_existed: bool,
-    transaction_id: &str,
-) -> Result<(), InstallPluginUpdateError> {
-    let result = if target_existed {
-        update_install::replace_file_from_source(backup, target, transaction_id)
-    } else {
-        fs::remove_file(target)
-    };
-    result.map_err(|error| InstallPluginUpdateError::Rollback(error.to_string()))
-}
-
-fn copy_synced(source: &Path, destination: &Path) -> io::Result<()> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(source, destination)?;
-    File::options().write(true).open(destination)?.sync_all()
 }
 
 pub fn mark_update_healthy_from_environment() -> io::Result<Option<PathBuf>> {
@@ -594,10 +220,6 @@ pub fn mark_update_healthy_from_environment() -> io::Result<Option<PathBuf>> {
     Ok(Some(marker))
 }
 
-pub fn cleanup_completed_update_staging() {
-    cleanup_completed_update_files(&paths::software_dir());
-}
-
 pub fn cleanup_completed_app_update(marker: PathBuf) {
     let Some(transaction_id) = health_marker_transaction_id(&marker).map(str::to_owned) else {
         return;
@@ -613,58 +235,6 @@ pub fn cleanup_completed_app_update(marker: PathBuf) {
         }
         std::thread::sleep(COMPLETED_UPDATE_CLEANUP_RETRY_INTERVAL);
     }
-}
-
-fn cleanup_completed_update_files(install_dir: &Path) {
-    if let Err(error) = migrate_legacy_plugin_metadata(install_dir) {
-        eprintln!("Failed to migrate Mod loader update state: {error}");
-    }
-    // Do not delete startup leftovers: another process may be preparing an
-    // update before its transaction JSON exists. Completion cleans its own ID.
-}
-
-fn migrate_legacy_plugin_metadata(install_dir: &Path) -> Result<(), String> {
-    let state_path = component_state_path(install_dir);
-    if !state_path.is_file() {
-        for legacy_path in [
-            legacy_mods_plugin_state_path(install_dir),
-            older_component_state_path(install_dir),
-        ] {
-            let Some(text) = read_limited_text(&legacy_path, MAX_COMPONENT_STATE_BYTES)
-                .map_err(|error| error.to_string())?
-            else {
-                continue;
-            };
-            let document: ComponentStateDocument =
-                serde_json::from_str(&text).map_err(|error| error.to_string())?;
-            if document.schema != COMPONENT_STATE_SCHEMA {
-                return Err(format!("unsupported schema {}", document.schema));
-            }
-            let normalized =
-                serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
-            atomic_write_text(&state_path, &normalized)?;
-            break;
-        }
-    }
-
-    let legacy_state_path = legacy_mods_plugin_state_path(install_dir);
-    if legacy_state_path.is_file() {
-        fs::remove_file(&legacy_state_path).map_err(|error| error.to_string())?;
-    }
-
-    let baseline_path = install_dir.join(MODS_PLUGIN_BASELINE_VERSION_PATH);
-    let legacy_baseline_path = install_dir.join(LEGACY_MODS_PLUGIN_BASELINE_VERSION_PATH);
-    if !baseline_path.is_file()
-        && let Some(text) =
-            read_limited_text(&legacy_baseline_path, 128).map_err(|error| error.to_string())?
-    {
-        Version::parse(text.trim()).map_err(|error| error.to_string())?;
-        atomic_write_text(&baseline_path, &text)?;
-    }
-    if legacy_baseline_path.is_file() {
-        fs::remove_file(legacy_baseline_path).map_err(|error| error.to_string())?;
-    }
-    Ok(())
 }
 
 fn cleanup_completed_transaction(update_root: &Path, transaction_id: &str, marker: &Path) {
@@ -912,25 +482,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_cleanup_preserves_an_open_download_and_uncommitted_staging() {
-        let root = update_test_directory("active-download-cleanup");
-        let update_root = root.join(UPDATE_ROOT_DIRECTORY);
-        let path = update_root.join("downloads/active.zip.part");
-        let staging = update_root.join("staging/active/nte-dps-tool.exe");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::create_dir_all(staging.parent().unwrap()).unwrap();
-        fs::write(&staging, b"candidate").unwrap();
-        let mut writer = File::create(&path).unwrap();
-        writer.write_all(b"first").unwrap();
-        cleanup_completed_update_files(&root);
-        writer.write_all(b"second").unwrap();
-        drop(writer);
-        assert_eq!(fs::read(&path).unwrap(), b"firstsecond");
-        assert_eq!(fs::read(&staging).unwrap(), b"candidate");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn completed_update_cleanup_removes_the_managed_root() {
         let root = update_test_directory("completed-cleanup");
         let update_root = root.join(UPDATE_ROOT_DIRECTORY);
@@ -948,88 +499,6 @@ mod tests {
         cleanup_completed_transaction(&update_root, "app-0.3.6-hash", &marker);
 
         assert!(!update_root.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn completed_update_cleanup_preserves_a_pending_transaction() {
-        let root = update_test_directory("pending-cleanup");
-        let update_root = root.join(UPDATE_ROOT_DIRECTORY);
-        let staging = update_root.join("staging/app-0.3.6-hash");
-        let transaction = update_root.join("transactions/app-0.3.6-hash.json");
-        fs::create_dir_all(&staging).unwrap();
-        fs::create_dir_all(transaction.parent().unwrap()).unwrap();
-        fs::write(&transaction, b"{}").unwrap();
-
-        cleanup_completed_update_files(&root);
-
-        assert!(staging.is_dir());
-        assert!(transaction.is_file());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn startup_migrates_plugin_state_without_deleting_the_legacy_root() {
-        let root = update_test_directory("state-migration");
-        let plugin_path = root.join(MODS_PLUGIN_PATH);
-        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
-        fs::write(&plugin_path, b"plugin-v2").unwrap();
-        let plugin_hash = sha256_file_io(&plugin_path).unwrap();
-        let legacy_state = older_component_state_path(&root);
-        fs::create_dir_all(legacy_state.parent().unwrap()).unwrap();
-        fs::write(
-            &legacy_state,
-            serde_json::to_vec_pretty(&ComponentStateDocument {
-                schema: COMPONENT_STATE_SCHEMA,
-                mods_plugin: Some(ComponentStateEntry {
-                    version: "0.3.7".to_owned(),
-                    sha256: hex::encode(plugin_hash),
-                }),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        cleanup_completed_update_files(&root);
-
-        assert!(legacy_state.is_file());
-        assert!(component_state_path(&root).is_file());
-        assert_eq!(
-            read_recorded_plugin_version(&root, &plugin_path).unwrap(),
-            Some(Version::parse("0.3.7").unwrap())
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn retired_plugin_metadata_names_migrate_to_mods_plugin_names() {
-        let root = update_test_directory("retired-plugin-metadata");
-        let plugin_path = root.join(MODS_PLUGIN_PATH);
-        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
-        fs::write(&plugin_path, b"plugin-v2").unwrap();
-        let plugin_hash = sha256_file_io(&plugin_path).unwrap();
-        let legacy_state = legacy_mods_plugin_state_path(&root);
-        fs::write(
-            &legacy_state,
-            format!(
-                "{{\"schema\":1,\"equipment_plugin\":{{\"version\":\"0.3.7\",\"sha256\":\"{}\"}}}}",
-                hex::encode(plugin_hash)
-            ),
-        )
-        .unwrap();
-        let legacy_baseline = root.join(LEGACY_MODS_PLUGIN_BASELINE_VERSION_PATH);
-        fs::write(&legacy_baseline, b"0.3.7\n").unwrap();
-
-        cleanup_completed_update_files(&root);
-
-        assert!(!legacy_state.exists());
-        assert!(!legacy_baseline.exists());
-        assert!(component_state_path(&root).is_file());
-        assert!(root.join(MODS_PLUGIN_BASELINE_VERSION_PATH).is_file());
-        assert_eq!(
-            read_recorded_plugin_version(&root, &plugin_path).unwrap(),
-            Some(Version::parse("0.3.7").unwrap())
-        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1054,8 +523,8 @@ mod tests {
         .unwrap();
         fs::write(&marker, b"healthy\n").unwrap();
 
-        let active_staging = update_root.join("staging/plugin-0.3.7-hash");
-        let active_download = update_root.join("downloads/plugin-0.3.7-hash.zip.part");
+        let active_staging = update_root.join("staging/app-0.3.7-hash");
+        let active_download = update_root.join("downloads/app-0.3.7-hash.zip.part");
         fs::create_dir_all(&active_staging).unwrap();
         fs::create_dir_all(active_download.parent().unwrap()).unwrap();
         fs::write(&active_download, b"partial package").unwrap();
@@ -1084,42 +553,5 @@ mod tests {
             health_marker_transaction_id(Path::new("health/app-0.3.6.json")),
             None
         );
-    }
-
-    #[test]
-    fn recorded_plugin_version_requires_the_matching_plugin_hash() {
-        let root = update_test_directory("plugin-version");
-        let plugin_path = root.join(MODS_PLUGIN_PATH);
-        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
-        fs::write(&plugin_path, b"plugin-v2").unwrap();
-        let hash = sha256_file_io(&plugin_path).unwrap();
-        let version = Version::parse("0.3.7").unwrap();
-        write_plugin_component_state(&root, &version, hash).unwrap();
-
-        assert_eq!(
-            read_recorded_plugin_version(&root, &plugin_path).unwrap(),
-            Some(version)
-        );
-
-        fs::write(&plugin_path, b"plugin-from-app-package").unwrap();
-        assert_eq!(
-            read_recorded_plugin_version(&root, &plugin_path).unwrap(),
-            None
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn bundled_plugin_baseline_version_is_read_from_the_release_sidecar() {
-        let root = update_test_directory("plugin-baseline");
-        let version_path = root.join(MODS_PLUGIN_BASELINE_VERSION_PATH);
-        fs::create_dir_all(version_path.parent().unwrap()).unwrap();
-        fs::write(&version_path, b"1.4.2\n").unwrap();
-
-        assert_eq!(
-            read_plugin_baseline_version(&root).unwrap(),
-            Some(Version::parse("1.4.2").unwrap())
-        );
-        fs::remove_dir_all(root).unwrap();
     }
 }

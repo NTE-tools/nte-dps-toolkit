@@ -9,7 +9,6 @@
 use std::{
     collections::{HashMap, VecDeque},
     net::Ipv4Addr,
-    panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     path::PathBuf,
     sync::{
@@ -22,8 +21,6 @@ use std::{
 
 use crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError, bounded, select_biased};
 
-#[cfg(feature = "desktop")]
-use super::diagnostics::DiagnosticQualityCache;
 use super::{
     CoreError, CoreErrorCode,
     capture::{CaptureController, CaptureControllerOptions},
@@ -31,7 +28,6 @@ use super::{
         HistoryArchivePolicy, PendingHistoryArchive, abyss_event_starts_new_round, auto_round_due,
     },
     reducer::{CoreSignal, apply_engine_event},
-    sync::lock_or_repair,
 };
 use crate::{
     engine::{
@@ -280,11 +276,6 @@ struct LiveCaptureInner {
     /// Atomically packed future-archive projection policy. Capture event
     /// boundaries load one coherent value without adding another hot lock.
     history_archive_policy: AtomicU8,
-    /// Derived, bounded diagnostics read model. This cache is the only lock
-    /// acquired before `event_gate`; no capture mutation ever acquires it, so
-    /// it cannot participate in a reverse lock-order cycle.
-    #[cfg(feature = "desktop")]
-    diagnostic_quality: Mutex<DiagnosticQualityCache>,
     revision: AtomicU64,
     packet_revision: AtomicU64,
     packet_session_generation: AtomicU64,
@@ -314,8 +305,6 @@ impl LiveCaptureService {
             history_archive_policy: AtomicU8::new(encode_history_archive_policy(
                 HistoryArchivePolicy::default(),
             )),
-            #[cfg(feature = "desktop")]
-            diagnostic_quality: Mutex::new(DiagnosticQualityCache),
             revision: AtomicU64::new(0),
             packet_revision: AtomicU64::new(0),
             packet_session_generation: AtomicU64::new(0),
@@ -424,32 +413,7 @@ impl LiveCaptureService {
     }
 
     pub fn quality_summary(&self) -> Result<CaptureQualitySummary, CoreError> {
-        #[cfg(feature = "desktop")]
-        {
-            self.cached_quality_summary()
-        }
-        #[cfg(not(feature = "desktop"))]
-        {
-            self.with_state_and_source(|state, source| state.capture_quality_summary(source))
-        }
-    }
-
-    #[cfg(feature = "desktop")]
-    fn cached_quality_summary(&self) -> Result<CaptureQualitySummary, CoreError> {
-        // This cache is a derived read model with no authoritative state.
-        // Resetting it fully restores its only invariant; the next projection
-        // rebuilds from the retained hit ring.
-        let (mut cache, _) = lock_or_repair(&self.0.diagnostic_quality, |cache| {
-            *cache = DiagnosticQualityCache;
-        });
-        let input = self.with_state_and_source(|state, source| {
-            cache.prepare(
-                state,
-                source,
-                self.0.packet_session_generation.load(Ordering::Acquire),
-            )
-        })?;
-        Ok(cache.finish(input))
+        self.with_state_and_source(|state, source| state.capture_quality_summary(source))
     }
 
     /// Returns a cheap monotonic marker for capture state that can affect
@@ -589,29 +553,10 @@ impl LiveCaptureService {
     }
 
     fn pending_archives_for_cleanup(&self) -> MutexGuard<'_, VecDeque<PendingHistoryArchive>> {
-        loop {
-            // `VecDeque` remains structurally valid across unwind. Its only
-            // service invariant is the explicit capacity bound, which the
-            // repair restores. No capture producer is stopped or joined while
-            // this guard is held.
-            let mut dropped = 0_u64;
-            let (pending, recovered) = lock_or_repair(&self.0.pending_abyss_archives, |pending| {
-                while pending.len() > MAX_PENDING_ABYSS_ARCHIVES {
-                    pending.pop_back();
-                    dropped += 1;
-                }
-            });
-            if !recovered {
-                return pending;
-            }
-            drop(pending);
-            if dropped > 0 {
-                self.0
-                    .dropped_history_archives
-                    .fetch_add(dropped, Ordering::AcqRel);
-            }
-            self.0.trip_integrity_failure();
-        }
+        self.0
+            .pending_abyss_archives
+            .lock()
+            .expect("pending archives lock is never poisoned")
     }
 
     pub fn dropped_history_archives(&self) -> u64 {
@@ -1169,7 +1114,7 @@ impl LiveCaptureInner {
             return;
         }
 
-        *lock_or_repair(&self.status, |_| {}).0 = terminal_capture_status();
+        *self.status.lock().expect("capture status lock") = terminal_capture_status();
         // One terminal state mutation invalidates both general and packet
         // projections. Outgoing-hit revision is deliberately untouched.
         self.revision.fetch_add(1, Ordering::AcqRel);
@@ -1177,7 +1122,12 @@ impl LiveCaptureInner {
             .fetch_add(1, Ordering::AcqRel);
         self.packet_revision.fetch_add(1, Ordering::AcqRel);
 
-        let control = lock_or_repair(&self.event_worker, |_| {}).0.control.clone();
+        let control = self
+            .event_worker
+            .lock()
+            .expect("event worker lock")
+            .control
+            .clone();
         if let Some(control) = control {
             let _ = control.try_send(EventWorkerControl::FailClosed);
         } else {
@@ -1189,8 +1139,8 @@ impl LiveCaptureInner {
     }
 
     fn take_failure_producers(&self) -> FailureProducers {
-        let controller = std::mem::take(&mut *lock_or_repair(&self.controller, |_| {}).0);
-        let replay = lock_or_repair(&self.replay, |_| {}).0.take();
+        let controller = std::mem::take(&mut *self.controller.lock().expect("controller lock"));
+        let replay = self.replay.lock().expect("replay lock").take();
         FailureProducers { controller, replay }
     }
 
@@ -1608,8 +1558,7 @@ fn engine_event_loop(
                 let Some(inner) = inner.upgrade() else {
                     break;
                 };
-                let result = catch_unwind(AssertUnwindSafe(|| inner.process_event(event)));
-                if !matches!(result, Ok(Ok(()))) {
+                if inner.process_event(event).is_err() {
                     inner.trip_integrity_failure();
                     drain_failed_runtime(
                         inner,
@@ -1718,10 +1667,7 @@ fn next_engine_input(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        panic::{AssertUnwindSafe, catch_unwind},
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use super::*;
     fn next_engine_event(
@@ -1965,33 +1911,6 @@ mod tests {
         assert_eq!(initial.hit_count, 50_000);
         assert_eq!(packet_updated.hit_count, 50_000);
         assert_eq!(packet_updated.packet_count, 1);
-    }
-
-    #[test]
-    #[cfg(feature = "desktop")]
-    fn poisoned_diagnostics_cache_rebuilds_without_failing_capture_state() {
-        let service = LiveCaptureService::new(LiveCaptureResources::default());
-        process(&service, hit(100.0));
-        service
-            .quality_summary()
-            .expect("initial diagnostics quality projection");
-        let poison_service = service.clone();
-        let _ = catch_unwind(AssertUnwindSafe(move || {
-            let _cache = poison_service
-                .0
-                .diagnostic_quality
-                .lock()
-                .expect("diagnostics cache lock");
-            panic!("poison derived diagnostics cache");
-        }));
-
-        let rebuilt = service
-            .quality_summary()
-            .expect("derived cache poison must be recoverable");
-
-        assert_eq!(rebuilt.hit_count, 1);
-        assert_eq!(service.status().phase, LiveCapturePhase::Idle);
-        assert!(!service.0.integrity_failed.load(Ordering::Acquire));
     }
 
     fn take_archives(service: &LiveCaptureService) -> Vec<PendingHistoryArchive> {
@@ -3501,112 +3420,6 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_authoritative_state_does_not_run_a_projection() {
-        let service = LiveCaptureService::new(LiveCaptureResources::default());
-        let initial_revision = service.revision();
-        let initial_packet_revision = service.0.packet_revision.load(Ordering::Acquire);
-        let initial_packet_session = service.0.packet_session_generation.load(Ordering::Acquire);
-        let poison_service = service.clone();
-        let _ = catch_unwind(AssertUnwindSafe(move || {
-            let _state = poison_service.0.state.lock().expect("lock live state");
-            panic!("poison authoritative live state");
-        }));
-        let projection_ran = AtomicBool::new(false);
-
-        let result = service.with_state(|_| projection_ran.store(true, Ordering::Release));
-
-        assert_eq!(
-            result.expect_err("a poisoned state must fail closed").code,
-            CoreErrorCode::CaptureStateUnavailable
-        );
-        assert!(!projection_ran.load(Ordering::Acquire));
-        assert_eq!(
-            service.status(),
-            LiveCaptureStatus {
-                phase: LiveCapturePhase::Failed,
-                issue: Some(LiveCaptureIssue::StateUnavailable),
-            }
-        );
-        assert_eq!(service.revision(), initial_revision + 1);
-        assert_eq!(
-            service.0.packet_revision.load(Ordering::Acquire),
-            initial_packet_revision + 1
-        );
-        assert_eq!(
-            service.0.packet_session_generation.load(Ordering::Acquire),
-            initial_packet_session + 1
-        );
-
-        assert_eq!(
-            service
-                .with_state(|_| ())
-                .expect_err("sticky failure must reject every later projection")
-                .code,
-            CoreErrorCode::CaptureStateUnavailable
-        );
-        assert_eq!(
-            service.revision(),
-            initial_revision + 1,
-            "the terminal revision effect must be applied exactly once"
-        );
-    }
-
-    #[test]
-    fn poisoned_event_gate_rejects_reset_before_mutating_the_live_round() {
-        let service = LiveCaptureService::new(LiveCaptureResources::default());
-        process(&service, hit(42.0));
-        let poison_service = service.clone();
-        let _ = catch_unwind(AssertUnwindSafe(move || {
-            let _gate = poison_service.0.event_gate.lock().expect("lock event gate");
-            panic!("poison live event gate");
-        }));
-
-        let result = service.reset_session();
-        let total_damage = service
-            .0
-            .state
-            .lock()
-            .expect("state itself remains healthy")
-            .total_damage;
-
-        assert_eq!(
-            result
-                .expect_err("a poisoned transaction gate must fail closed")
-                .code,
-            CoreErrorCode::CaptureStateUnavailable
-        );
-        assert_eq!(total_damage, 42.0, "reset must not partially commit");
-    }
-
-    #[test]
-    fn poisoned_idle_timer_is_a_sticky_terminal_capture_failure() {
-        let service = LiveCaptureService::new(LiveCaptureResources::default());
-        let poison_service = service.clone();
-        let _ = catch_unwind(AssertUnwindSafe(move || {
-            let _timer = poison_service
-                .0
-                .last_outgoing_hit_at
-                .lock()
-                .expect("lock idle timer");
-            panic!("poison live idle timer");
-        }));
-
-        let error = service
-            .idle_elapsed()
-            .expect_err("a poisoned idle timer must fail closed");
-
-        assert_eq!(error.code, CoreErrorCode::CaptureStateUnavailable);
-        assert_eq!(service.status(), terminal_capture_status());
-        assert_eq!(
-            service
-                .idle_elapsed()
-                .expect_err("idle timer failure must remain sticky")
-                .code,
-            CoreErrorCode::CaptureStateUnavailable
-        );
-    }
-
-    #[test]
     fn replay_final_event_joins_the_owner_without_deadlocking() {
         let service = LiveCaptureService::new(LiveCaptureResources::default());
         service
@@ -3650,114 +3463,6 @@ mod tests {
                 .is_none(),
             "the completed replay owner must be removed"
         );
-    }
-
-    #[test]
-    fn fail_closed_worker_cancels_and_drains_the_replay_owner() {
-        let service = LiveCaptureService::new(LiveCaptureResources::default());
-        service
-            .ensure_event_worker()
-            .expect("event worker should start");
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let thread = thread::Builder::new()
-            .name("nte-test-replay-owner".to_owned())
-            .spawn(move || {
-                while !worker_stop.load(Ordering::Acquire) {
-                    thread::yield_now();
-                }
-            })
-            .expect("test replay owner should start");
-        *service.0.replay.lock().expect("replay owner lock") = Some(ReplayTask {
-            stop: Arc::clone(&stop),
-            thread,
-        });
-        let poison_service = service.clone();
-        let _ = catch_unwind(AssertUnwindSafe(move || {
-            let _state = poison_service.0.state.lock().expect("lock live state");
-            panic!("poison authoritative state with active replay owner");
-        }));
-
-        assert_eq!(
-            service
-                .with_state(|_| ())
-                .expect_err("state poison must fail closed")
-                .code,
-            CoreErrorCode::CaptureStateUnavailable
-        );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let finished = service
-                .0
-                .event_worker
-                .lock()
-                .expect("event worker runtime lock")
-                .worker
-                .as_ref()
-                .is_some_and(thread::JoinHandle::is_finished);
-            if finished || Instant::now() >= deadline {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-
-        assert!(stop.load(Ordering::Acquire));
-        assert!(
-            service
-                .0
-                .replay
-                .lock()
-                .expect("replay owner lock")
-                .is_none(),
-            "fail-closed cleanup must remove the replay owner"
-        );
-        assert!(
-            service
-                .0
-                .event_worker
-                .lock()
-                .expect("event worker runtime lock")
-                .worker
-                .as_ref()
-                .is_some_and(thread::JoinHandle::is_finished),
-            "fail-closed cleanup must terminate the event worker"
-        );
-    }
-
-    #[test]
-    fn sticky_failure_keeps_already_cut_abyss_retries_salvageable() {
-        let service = LiveCaptureService::new(LiveCaptureResources::default());
-        process(
-            &service,
-            EngineEvent::Abyss(AbyssEvent::Stage {
-                timestamp: 0.0,
-                floor: Some(12),
-                half: crate::engine::model::AbyssHalf::First,
-                allow_late_backfill: false,
-            }),
-        );
-        process(&service, hit(123.0));
-        process(&service, EngineEvent::CaptureStopped);
-        let archive = take_archives(&service)
-            .pop()
-            .expect("finished Abyss round should be queued");
-        let poison_service = service.clone();
-        let _ = catch_unwind(AssertUnwindSafe(move || {
-            let _state = poison_service.0.state.lock().expect("lock live state");
-            panic!("poison capture after round cut");
-        }));
-        assert!(service.with_state(|_| ()).is_err());
-
-        service
-            .restore_pending_abyss_archives(vec![archive])
-            .expect("durability cleanup must accept retry after capture failure");
-
-        let salvaged = service
-            .take_pending_abyss_archives()
-            .expect("durability cleanup must drain retry after capture failure");
-        assert_eq!(salvaged.len(), 1);
-        assert_eq!(salvaged[0].source, CaptureQualitySource::Unknown);
-        assert_eq!(service.status(), terminal_capture_status());
     }
 
     #[test]

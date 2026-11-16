@@ -1,18 +1,11 @@
-use std::{
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::atomic::Ordering,
-    time::Duration,
-};
+use std::{sync::atomic::Ordering, time::Duration};
 
 use serde::Serialize;
 use tauri::{State, WebviewWindow, ipc::Channel};
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::{
-    contract::{
-        CommandError,
-        stream::{MAX_STREAM_DELIVERY_BYTES, StreamKind},
-    },
+    contract::{CommandError, SubscriptionReceipt, stream::StreamKind},
     state::{AppState, StreamRegistration, StreamRegistryError},
 };
 
@@ -91,6 +84,85 @@ impl<T> StreamDeliveryEndpoint<T> {
     }
 }
 
+pub(crate) fn subscribe_polling_stream<T, Poll>(
+    subscription_id: String,
+    stream_kind: StreamKind,
+    interval_ms: u32,
+    on_event: Channel<T>,
+    state: &AppState,
+    window: &WebviewWindow,
+    poll: Poll,
+) -> Result<SubscriptionReceipt, CommandError>
+where
+    T: Serialize + Send + 'static,
+    Poll: FnMut(&AppState) -> PollingStreamOutput<T> + Send + 'static,
+{
+    let stream_key = stream_kind.stream_key(&subscription_id);
+    let state = state.clone();
+    let registration = state.reserve_stream(window.label(), &stream_key)?;
+    let stream_generation = registration.generation();
+    spawn_polling_stream(
+        StreamDeliveryEndpoint::new(on_event),
+        state,
+        registration,
+        interval_ms,
+        poll,
+    )?;
+    Ok(SubscriptionReceipt::new(
+        subscription_id,
+        stream_kind,
+        stream_generation,
+        interval_ms,
+    ))
+}
+
+pub(crate) fn subscribe_blocking_polling_stream<T, Poll>(
+    subscription_id: String,
+    stream_kind: StreamKind,
+    interval_ms: u32,
+    on_event: Channel<T>,
+    state: &AppState,
+    window: &WebviewWindow,
+    poll: Poll,
+) -> Result<SubscriptionReceipt, CommandError>
+where
+    T: Serialize + Send + 'static,
+    Poll: FnMut(&AppState, &std::sync::Arc<std::sync::atomic::AtomicBool>) -> PollingStreamOutput<T>
+        + Send
+        + 'static,
+{
+    let stream_key = stream_kind.stream_key(&subscription_id);
+    let state = state.clone();
+    let registration = state.reserve_stream(window.label(), &stream_key)?;
+    let stream_generation = registration.generation();
+    spawn_blocking_polling_stream(
+        StreamDeliveryEndpoint::new(on_event),
+        state,
+        registration,
+        interval_ms,
+        poll,
+    )?;
+    Ok(SubscriptionReceipt::new(
+        subscription_id,
+        stream_kind,
+        stream_generation,
+        interval_ms,
+    ))
+}
+
+pub(crate) fn unsubscribe_stream(
+    subscription_id: &str,
+    stream_kind: StreamKind,
+    state: &AppState,
+    window: &WebviewWindow,
+    validate_window: impl FnOnce(&WebviewWindow) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    validate_subscription_id(subscription_id)?;
+    validate_window(window)?;
+    state.stop_stream(window.label(), &stream_kind.stream_key(subscription_id))?;
+    Ok(())
+}
+
 /// Starts one lightweight async owner per subscription.
 ///
 /// The registry owns cancellation and replacement. Tokio's skipped-tick policy
@@ -98,7 +170,6 @@ impl<T> StreamDeliveryEndpoint<T> {
 /// A disconnected Channel or invalid projection ends the subscription and
 /// removes its registry entry.
 pub(crate) fn spawn_polling_stream<T, Poll>(
-    stream_name: &'static str,
     delivery: StreamDeliveryEndpoint<T>,
     state: AppState,
     registration: StreamRegistration,
@@ -135,28 +206,16 @@ where
                 continue;
             }
 
-            let output = catch_unwind(AssertUnwindSafe(|| poll(&task_state)));
-            let event = match output {
-                Ok(PollingStreamOutput::NoChange) => continue,
-                Ok(PollingStreamOutput::Event(event)) => event,
-                Ok(PollingStreamOutput::Stop) => break,
-                Err(_) => {
-                    log::error!("{stream_name} stream projection panicked; subscription stopped");
-                    break;
-                }
+            let event = match poll(&task_state) {
+                PollingStreamOutput::NoChange => continue,
+                PollingStreamOutput::Event(event) => event,
+                PollingStreamOutput::Stop => break,
             };
 
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            if !delivery_fits(&event) {
-                log::error!(
-                    "{stream_name} stream delivery exceeded the {} byte limit",
-                    MAX_STREAM_DELIVERY_BYTES
-                );
-                break;
-            }
-            if !task_registration.begin_delivery() || delivery.channel.send(event).is_err() {
+            if stop.load(Ordering::Acquire)
+                || !task_registration.begin_delivery()
+                || delivery.channel.send(event).is_err()
+            {
                 break;
             }
         }
@@ -170,20 +229,16 @@ where
     Ok(())
 }
 
-fn delivery_fits<T: Serialize>(event: &T) -> bool {
-    serde_json::to_vec(event)
-        .map(|encoded| encoded.len() <= MAX_STREAM_DELIVERY_BYTES)
-        .unwrap_or(false)
-}
-
 /// Subscription-owned blocking work; cancellation is passed into finite IPC.
-/// Unlike projection-only streams, this must not occupy a Tokio executor thread.
+/// Runs its timer on Tokio and dispatches each active poll pass onto Tokio's
+/// blocking thread pool so it neither stalls async workers nor pins a sleeping
+/// OS thread while idle.
 pub(crate) fn spawn_blocking_polling_stream<T, Poll>(
     delivery: StreamDeliveryEndpoint<T>,
     state: AppState,
     registration: StreamRegistration,
     interval_ms: u32,
-    mut poll: Poll,
+    poll: Poll,
 ) -> Result<(), CommandError>
 where
     T: Serialize + Send + 'static,
@@ -199,35 +254,52 @@ where
             return Err(CommandError::stream_runtime_unavailable());
         }
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let stop = registration.stop_token();
-        let active = registration.activation_token();
+    let task_state = state.clone();
+    let task_registration = registration.clone();
+    tauri::async_runtime::spawn(async move {
+        let stop = task_registration.stop_token();
+        let active = task_registration.activation_token();
+        let mut ticker = interval(Duration::from_millis(u64::from(interval_ms.max(1))));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut poll = Some(poll);
+
         while !stop.load(Ordering::Acquire) {
-            if active.load(Ordering::Acquire) && registration.delivery_ready() {
-                let output = catch_unwind(AssertUnwindSafe(|| poll(&state, &stop)));
-                match output {
-                    Ok(PollingStreamOutput::NoChange) => {}
-                    Ok(PollingStreamOutput::Event(event)) => {
-                        if stop.load(Ordering::Acquire)
-                            || !delivery_fits(&event)
-                            || !registration.begin_delivery()
-                            || delivery.channel.send(event).is_err()
-                        {
-                            break;
-                        }
-                    }
-                    _ => break,
-                }
+            ticker.tick().await;
+            if stop.load(Ordering::Acquire)
+                || !active.load(Ordering::Acquire)
+                || !task_registration.delivery_ready()
+            {
+                continue;
             }
-            for _ in 0..interval_ms.div_ceil(25) {
-                if stop.load(Ordering::Acquire) {
-                    break;
+            let Some(mut poll_fn) = poll.take() else {
+                break;
+            };
+            let poll_state = task_state.clone();
+            let poll_stop = stop.clone();
+            let Ok((poll_fn, output)) = tauri::async_runtime::spawn_blocking(move || {
+                let output = poll_fn(&poll_state, &poll_stop);
+                (poll_fn, output)
+            })
+            .await
+            else {
+                break;
+            };
+            poll = Some(poll_fn);
+            match output {
+                PollingStreamOutput::NoChange => {}
+                PollingStreamOutput::Event(event) => {
+                    if stop.load(Ordering::Acquire)
+                        || !task_registration.begin_delivery()
+                        || delivery.channel.send(event).is_err()
+                    {
+                        break;
+                    }
                 }
-                std::thread::sleep(Duration::from_millis(25));
+                PollingStreamOutput::Stop => break,
             }
         }
-        registration.cancel();
-        let _ = state.finish_stream(&registration);
+        task_registration.cancel();
+        let _ = task_state.finish_stream(&task_registration);
     });
     Ok(())
 }
@@ -261,7 +333,7 @@ mod tests {
                 })
                 .unwrap();
             } else {
-                spawn_polling_stream("fixture", delivery, state.clone(), registration, 1, |_| {
+                spawn_polling_stream(delivery, state.clone(), registration, 1, |_| {
                     PollingStreamOutput::Event("snapshot")
                 })
                 .unwrap();
@@ -292,11 +364,5 @@ mod tests {
         assert!(!is_valid_subscription_id(""));
         assert!(!is_valid_subscription_id("contains:colon"));
         assert!(!is_valid_subscription_id(&"a".repeat(65)));
-    }
-
-    #[test]
-    fn delivery_size_check_enforces_the_contract_limit() {
-        assert!(delivery_fits(&"small"));
-        assert!(!delivery_fits(&"x".repeat(MAX_STREAM_DELIVERY_BYTES)));
     }
 }

@@ -1,4 +1,3 @@
-use crate::contract::island::IslandTone;
 use std::fs;
 
 use nte_dps_tool::{core::live_capture::LiveCapturePhase, storage::paths::capture_log_dir};
@@ -8,7 +7,7 @@ use crate::{
     commands::desktop_window,
     contract::CommandError,
     file_dialog,
-    state::{AppState, DesktopWindowKind},
+    state::{AppState, DesktopWindowKind, PresentationError},
     windows::{console, hud, main_dps},
 };
 
@@ -38,36 +37,32 @@ pub(crate) async fn execute_console_control(
         ConsoleControlAction::ToggleCapture => toggle_capture(&state),
         ConsoleControlAction::ResetSession => {
             state.ensure_session_undo_runtime_available()?;
-            if matches!(
-                state.capture_phase(),
-                LiveCapturePhase::Starting | LiveCapturePhase::Running | LiveCapturePhase::Stopping
-            ) || state.replay_running()?
-            {
-                return Err(CommandError::new(
-                    "confirmation_required",
-                    "Confirm resetting the active capture from the main window",
-                ));
-            }
-            let undo_token = state.reset_session_with_undo_action()?;
-            state.set_main_processing_paused(false)?;
-            state.set_main_selected_round_id(None)?;
-            state.publish_island_notice(
-                IslandTone::Success,
-                if undo_token.is_some() {
-                    "Session reset. Use Undo within 5 seconds."
-                } else {
-                    "Stats reset"
-                },
-                Vec::new(),
-                undo_token,
-            );
-            crate::windows::island::show_notice(&app, &state)?;
+            let worker_state = state.inner().clone();
+            let undo_token = tauri::async_runtime::spawn_blocking(move || {
+                if worker_state.is_capture_or_replay_active()? {
+                    return Err(CommandError::new(
+                        "confirmation_required",
+                        "Confirm resetting the active capture from the main window",
+                    ));
+                }
+                Ok::<_, CommandError>(worker_state.reset_session_with_undo_action()?)
+            })
+            .await
+            .map_err(|_| {
+                CommandError::new("reset_failed", "Failed to reset the current session")
+            })??;
+            crate::windows::island::publish_reset_notice(&app, state.inner(), undo_token);
             Ok(())
         }
         ConsoleControlAction::ToggleHud => toggle_hud(&app, &state),
         ConsoleControlAction::TogglePassthrough => toggle_passthrough(&app, &state),
         ConsoleControlAction::ToggleProcessing => {
-            state.set_main_processing_paused(!state.main_processing_paused())?;
+            let worker_state = state.inner().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                worker_state.set_main_processing_paused(!worker_state.main_processing_paused())
+            })
+            .await
+            .map_err(|_| CommandError::from(PresentationError::StateUnavailable))??;
             Ok(())
         }
         ConsoleControlAction::TogglePin => toggle_pin(&state, &window),

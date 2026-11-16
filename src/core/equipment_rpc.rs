@@ -6,17 +6,24 @@ use crate::platform::{
 };
 use serde_json::{Value, json};
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
+};
+#[cfg(feature = "desktop")]
+use std::sync::{
+    Mutex,
     mpsc::{self, Receiver, SyncSender},
 };
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Router {
+    #[cfg(feature = "desktop")]
     route: Mutex<Option<(u64, String, SyncSender<Pending>)>>,
+    #[cfg(feature = "desktop")]
     next: AtomicU64,
 }
+#[cfg(feature = "desktop")]
 pub(crate) struct Pending {
     pub id: String,
     pub method: String,
@@ -25,11 +32,13 @@ pub(crate) struct Pending {
     pub canceled: Arc<AtomicBool>,
     pub reply: SyncSender<Result<Value, ToolkitError>>,
 }
+#[cfg(feature = "desktop")]
 pub(crate) struct Registration {
     router: Arc<Router>,
     token: u64,
     pub receiver: Receiver<Pending>,
 }
+#[cfg(feature = "desktop")]
 impl Drop for Registration {
     fn drop(&mut self) {
         if let Ok(mut route) = self.router.route.lock()
@@ -43,6 +52,7 @@ impl Drop for Registration {
     }
 }
 impl Router {
+    #[cfg(feature = "desktop")]
     pub(crate) fn register(
         self: &Arc<Self>,
         identity: String,
@@ -61,15 +71,20 @@ impl Router {
         })
     }
     pub fn connect(&self, host: &ToolkitClient, pid: u32) -> Result<Client, ToolkitError> {
-        let route = self.route.lock().map_err(|_| ToolkitError::Failed)?.clone();
-        let transport = if let Some((_, owner, tx)) = route {
-            if owner != host.identity() {
-                return Err(ToolkitError::SessionChanged);
+        #[cfg(feature = "desktop")]
+        let transport = {
+            let route = self.route.lock().map_err(|_| ToolkitError::Failed)?.clone();
+            if let Some((_, owner, tx)) = route {
+                if owner != host.identity() {
+                    return Err(ToolkitError::SessionChanged);
+                }
+                Transport::Relay(tx)
+            } else {
+                Transport::Direct(CapturePipe::open(host)?)
             }
-            Transport::Relay(tx)
-        } else {
-            Transport::Direct(CapturePipe::open(host)?)
         };
+        #[cfg(not(feature = "desktop"))]
+        let transport = Transport::Direct(CapturePipe::open(host)?);
         let mut client = Client {
             transport,
             stop: Arc::new(AtomicBool::new(false)),
@@ -93,6 +108,7 @@ impl Router {
 }
 enum Transport {
     Direct(CapturePipe),
+    #[cfg(feature = "desktop")]
     Relay(SyncSender<Pending>),
 }
 pub struct Client {
@@ -188,6 +204,7 @@ impl Client {
                     std::thread::sleep(Duration::from_millis(2));
                 }
             }
+            #[cfg(feature = "desktop")]
             Transport::Relay(tx) => {
                 let (reply, rx) = mpsc::sync_channel(1);
                 let canceled = Arc::new(AtomicBool::new(false));
@@ -228,6 +245,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "desktop")]
     #[test]
     fn relay_is_bounded_and_drops_pending_work_on_owner_end() {
         let router = Arc::new(Router::default());
@@ -299,6 +317,7 @@ mod tests {
             Err(ToolkitError::Unavailable)
         );
     }
+    #[cfg(feature = "desktop")]
     #[test]
     fn subscription_cancellation_cancels_queued_control_without_waiting_for_reply() {
         let (tx, rx) = mpsc::sync_channel(1);

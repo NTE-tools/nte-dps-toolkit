@@ -1,9 +1,13 @@
-use std::{sync::mpsc, thread, time::Duration};
+use std::time::Duration;
 
 use nte_dps_tool::storage::config::CONSOLE_WINDOW_MIN_SIZE;
 use tauri::{LogicalPosition, LogicalSize, Position, Size, WebviewWindow, WindowEvent};
 
-use crate::{contract::CommandError, state::AppState, windows::window_position};
+use crate::{
+    contract::CommandError,
+    state::AppState,
+    windows::window_position::{self, DebouncedEvent, WindowPersistenceRuntime},
+};
 
 pub(crate) const CONSOLE_WINDOW_LABEL: &str = "console";
 pub(crate) const CONSOLE_NAVIGATE_EVENT: &str = "console-navigate";
@@ -26,19 +30,23 @@ pub(crate) fn validate_window(window: &WebviewWindow) -> Result<(), CommandError
 
 /// The main DPS window owns the desktop lifetime. Closing Console only hides
 /// it so toolbar state and subscriptions can be restored without rebuilding.
-pub(crate) fn initialize(window: &WebviewWindow, state: &AppState) -> Result<(), String> {
+pub(crate) fn initialize(
+    window: &WebviewWindow,
+    state: &AppState,
+    persistence: &WindowPersistenceRuntime,
+) -> Result<(), String> {
     let console_webview = window.as_ref().clone();
     if let Err(error) = console_webview.set_auto_resize(true) {
         log::warn!("enable native Console WebView auto-resize failed: {error}");
     }
     restore_geometry(window, state)?;
 
-    let (sender, receiver) = mpsc::channel::<Option<ConsoleGeometry>>();
     let persistence_state = state.clone();
-    thread::Builder::new()
-        .name("tauri-console-geometry-save".to_owned())
-        .spawn(move || persist_geometry_loop(receiver, persistence_state))
-        .map_err(|error| error.to_string())?;
+    let sender = persistence.spawn_debounced(
+        "tauri-console-geometry-save",
+        GEOMETRY_SAVE_DEBOUNCE,
+        move |geometry: ConsoleGeometry| persist_geometry(&persistence_state, geometry),
+    )?;
 
     let close_window = window.clone();
     let event_window = window.clone();
@@ -47,20 +55,20 @@ pub(crate) fn initialize(window: &WebviewWindow, state: &AppState) -> Result<(),
         | WindowEvent::Resized(_)
         | WindowEvent::ScaleFactorChanged { .. } => {
             if let Some(geometry) = current_geometry(&event_window) {
-                let _ = sender.send(Some(geometry));
+                let _ = sender.send(DebouncedEvent::Changed(geometry));
             }
         }
         WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
             if let Some(geometry) = current_geometry(&event_window) {
-                let _ = sender.send(Some(geometry));
+                let _ = sender.send(DebouncedEvent::Changed(geometry));
             }
             if let Err(error) = close_window.hide() {
                 log::error!("hide Console window failed: {error}");
             }
         }
         WindowEvent::Destroyed => {
-            let _ = sender.send(None);
+            let _ = sender.send(DebouncedEvent::Shutdown);
         }
         _ => {}
     });
@@ -109,25 +117,6 @@ fn current_geometry(window: &WebviewWindow) -> Option<ConsoleGeometry> {
         ],
         position,
     })
-}
-
-fn persist_geometry_loop(receiver: mpsc::Receiver<Option<ConsoleGeometry>>, state: AppState) {
-    while let Ok(message) = receiver.recv() {
-        let Some(mut latest) = message else {
-            return;
-        };
-        loop {
-            match receiver.recv_timeout(GEOMETRY_SAVE_DEBOUNCE) {
-                Ok(Some(next)) => latest = next,
-                Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    persist_geometry(&state, latest);
-                    return;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-            }
-        }
-        persist_geometry(&state, latest);
-    }
 }
 
 fn persist_geometry(state: &AppState, geometry: ConsoleGeometry) {

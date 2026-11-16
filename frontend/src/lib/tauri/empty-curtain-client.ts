@@ -1,14 +1,14 @@
 import { invokeCommand, type CommandError } from "@/lib/tauri/command-error";
+import type { CharacterEquipmentAction } from "@/lib/tauri/generated/CharacterEquipmentAction";
 import type { EmptyCurtainEvent } from "@/lib/tauri/generated/EmptyCurtainEvent";
 import type { EmptyCurtainFileResult } from "@/lib/tauri/generated/EmptyCurtainFileResult";
 import type { EmptyCurtainPositionSnapshot } from "@/lib/tauri/generated/EmptyCurtainPositionSnapshot";
 import type { EmptyCurtainSnapshot } from "@/lib/tauri/generated/EmptyCurtainSnapshot";
+import type { EquipmentAction } from "@/lib/tauri/generated/EquipmentAction";
 import type { ItemUidSnapshot } from "@/lib/tauri/generated/ItemUidSnapshot";
 import { subscribeStream } from "@/lib/tauri/stream-client";
 
-export type EquipmentAction =
-  "lock" | "unlock" | "discard" | "restore" | "unequip" | "equip";
-export type CharacterEquipmentAction = "unequip-all" | "one-click";
+export type { CharacterEquipmentAction, EquipmentAction };
 
 export interface ManageItemInput {
   item: ItemUidSnapshot;

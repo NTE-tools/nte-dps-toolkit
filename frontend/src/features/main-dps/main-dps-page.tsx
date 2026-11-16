@@ -161,12 +161,14 @@ export function MainDpsPage() {
       );
     } else if (
       !event.ctrlKey &&
-      event.key === "Tab" &&
+      (event.key === "[" || event.key === "]") &&
       snapshot.readout.abyss.detected
     ) {
       event.preventDefault();
-      const next = snapshot.readout.abyss.half === "first" ? "second" : "first";
-      void mutate("abyss-half", () => mainDpsClient.selectAbyssHalf(next));
+      const next = event.key === "[" ? "first" : "second";
+      if (snapshot.readout.abyss.half !== next) {
+        void mutate("abyss-half", () => mainDpsClient.selectAbyssHalf(next));
+      }
     }
   });
 
@@ -415,8 +417,8 @@ function ConfirmationDialog({
     >
       <AlertDialogPortal>
         <AlertDialogBackdrop className="z-[70]" />
-        <AlertDialogPopup className="top-1/2 left-1/2 z-[71] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-background p-5 shadow-2xl">
-          <AlertDialogTitle className="text-sm">
+        <AlertDialogPopup className="top-1/2 left-1/2 z-[71] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-background p-5 shadow-xl">
+          <AlertDialogTitle>
             {t(
               kind === "start"
                 ? "Confirm Start"
@@ -435,10 +437,13 @@ function ConfirmationDialog({
             )}
           </AlertDialogDescription>
           <div className="mt-5 flex justify-end gap-2">
-            <AlertDialogClose render={<Button variant="outline" />}>
+            <AlertDialogClose render={<Button variant="outline" autoFocus />}>
               {t("Cancel")}
             </AlertDialogClose>
-            <Button onClick={onConfirm}>
+            <Button
+              variant={kind === "reset" ? "destructive" : "default"}
+              onClick={onConfirm}
+            >
               {t(
                 kind === "start"
                   ? "Start"
@@ -487,6 +492,7 @@ function RoundSelector({
         <ChevronLeft />
       </Button>
       <NativeSelect
+        aria-label={t("Combat Round")}
         className="h-7 w-auto px-2"
         value={snapshot.selectedRoundId ?? ""}
         onChange={(event) =>

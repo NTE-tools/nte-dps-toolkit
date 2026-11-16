@@ -1,7 +1,7 @@
 use tauri::{State, WebviewWindow, ipc::Channel};
 
 use crate::{
-    channels::stream_runtime::validate_subscription_id,
+    channels::stream_runtime::{unsubscribe_stream, validate_subscription_id},
     contract::{CommandError, SubscriptionReceipt, history::HistoryEvent, stream::StreamKind},
     history_runtime::{HISTORY_STREAM_INTERVAL, HistoryRuntime, HistoryStreamRegistration},
     state::AppState,
@@ -52,11 +52,11 @@ pub(crate) fn unsubscribe_history(
     _runtime: State<'_, HistoryRuntime>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    console::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::History.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::History,
+        state.inner(),
+        &window,
+        console::validate_window,
+    )
 }

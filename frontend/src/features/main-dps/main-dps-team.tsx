@@ -393,7 +393,6 @@ function DamageAttributionStrip({
       ))}
       {showMaxHpReduction && (
         <MaxHpCompressionEffect
-          key={attribution.maxHpReduction}
           label={t("Life reduction")}
           value={
             attribution.includeMaxHpReductionInTotalDamage

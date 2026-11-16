@@ -980,8 +980,9 @@ pub(super) fn run(
         let mut stopping: Option<Instant> = None;
         let mut stop_reply = false;
         let mut final_clock = false;
-        let mut control: Option<super::super::equipment_rpc::Pending> = None;
+        let mut control = ControlRelayState::new();
         loop {
+            control.expire_if_needed(Instant::now());
             if stop.load(Ordering::Acquire) && stopping.is_none() && !cursor.ended {
                 pipe.send("stop", "combat.stop", json!({"captureId":capture}))?;
                 stopping = Some(Instant::now() + Duration::from_secs(5));
@@ -995,15 +996,17 @@ pub(super) fn run(
                 pipe.send(&id, "combat_clock.query_transitions", json!({}))?;
                 pending = Some((id, Instant::now() + Duration::from_secs(5)));
             }
-            if control.is_none()
+            if control.active.is_none()
                 && stopping.is_none()
                 && let Ok(request) = relay.receiver.try_recv()
             {
-                if request.canceled.load(Ordering::Acquire) || Instant::now() >= request.deadline {
+                if request.canceled.load(Ordering::Acquire) {
                     let _ = request.reply.try_send(Err(ToolkitError::Cancelled));
+                } else if Instant::now() >= request.deadline {
+                    let _ = request.reply.try_send(Err(ToolkitError::Timeout));
                 } else {
                     match pipe.send(&request.id, &request.method, request.params.clone()) {
-                        Ok(()) => control = Some(request),
+                        Ok(()) => control.active = Some(request),
                         Err(error) => {
                             let _ = request.reply.try_send(Err(error));
                         }
@@ -1011,15 +1014,9 @@ pub(super) fn run(
                 }
             }
             if let Some(bytes) = pipe.read(&never_cancel)? {
-                let v = parse(&bytes)?;
-                if control.as_ref().is_some_and(|p| v["id"] == p.id) {
-                    if let Some(request) = control.take() {
-                        let result =
-                            super::super::equipment_rpc::response(v, &request.id, &request.method);
-                        let _ = request.reply.try_send(result);
-                    }
+                let Some(v) = control.handle_or_pass(parse(&bytes)?) else {
                     continue;
-                }
+                };
                 let events = if let Some(id) = v["id"].as_str() {
                     if v.get("error").is_some() {
                         return Err(ToolkitError::Failed);
@@ -1069,6 +1066,70 @@ pub(super) fn run(
         let _ = sender.send(EngineEvent::Error(format!("plugin native push: {e}")));
     }
     let _ = sender.send(EngineEvent::CaptureStopped);
+}
+
+const MAX_ABANDONED_CONTROL_IDS: usize = 32;
+
+struct ControlRelayState {
+    active: Option<super::super::equipment_rpc::Pending>,
+    abandoned_ids: VecDeque<String>,
+}
+
+impl ControlRelayState {
+    fn new() -> Self {
+        Self {
+            active: None,
+            abandoned_ids: VecDeque::new(),
+        }
+    }
+
+    fn expire_if_needed(&mut self, now: Instant) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let error = if active.canceled.load(Ordering::Acquire) {
+            ToolkitError::Cancelled
+        } else if now >= active.deadline {
+            ToolkitError::Timeout
+        } else {
+            return;
+        };
+        if let Some(request) = self.active.take() {
+            let _ = request.reply.try_send(Err(error));
+            if self.abandoned_ids.len() == MAX_ABANDONED_CONTROL_IDS {
+                self.abandoned_ids.pop_front();
+            }
+            self.abandoned_ids.push_back(request.id);
+        }
+    }
+
+    fn handle_or_pass(&mut self, v: Value) -> Option<Value> {
+        if self.active.as_ref().is_some_and(|p| v["id"] == p.id) {
+            if let Some(request) = self.active.take() {
+                let result = super::super::equipment_rpc::response(v, &request.id, &request.method);
+                let _ = request.reply.try_send(result);
+            }
+            return None;
+        }
+        if let Some(id) = v["id"].as_str()
+            && let Some(pos) = self
+                .abandoned_ids
+                .iter()
+                .position(|abandoned| abandoned == id)
+        {
+            self.abandoned_ids.remove(pos);
+            return None;
+        }
+        Some(v)
+    }
+}
+
+impl Drop for ControlRelayState {
+    fn drop(&mut self) {
+        if let Some(request) = self.active.take() {
+            let _ = request.reply.try_send(Err(ToolkitError::Cancelled));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2304,5 +2365,64 @@ mod tests {
         assert_eq!(c.clock(clock(3, 0, 1)).unwrap_err(), ToolkitError::DataGap);
         assert_eq!(c.clock_seq, Some(1));
         assert!(c.clock(clock(2, 0, 1)).is_ok());
+    }
+
+    #[test]
+    fn control_relay_evicts_expired_or_canceled_requests_and_absorbs_late_replies() {
+        use crate::core::equipment_rpc;
+        let now = Instant::now();
+        let mut state = ControlRelayState::new();
+
+        let (tx_timeout, rx_timeout) = std::sync::mpsc::sync_channel(1);
+        state.active = Some(equipment_rpc::Pending {
+            id: "eq-timeout".into(),
+            method: "inventory.snapshot".into(),
+            params: json!({}),
+            deadline: now,
+            canceled: Arc::new(AtomicBool::new(false)),
+            reply: tx_timeout,
+        });
+        state.expire_if_needed(now + Duration::from_millis(1));
+        assert!(state.active.is_none());
+        assert_eq!(rx_timeout.try_recv().unwrap(), Err(ToolkitError::Timeout));
+        assert!(
+            state
+                .handle_or_pass(json!({"jsonrpc":"2.0","id":"eq-timeout","result":{}}))
+                .is_none()
+        );
+
+        let canceled = Arc::new(AtomicBool::new(true));
+        let (tx_cancel, rx_cancel) = std::sync::mpsc::sync_channel(1);
+        state.active = Some(equipment_rpc::Pending {
+            id: "eq-cancel".into(),
+            method: "inventory.snapshot".into(),
+            params: json!({}),
+            deadline: now + Duration::from_secs(10),
+            canceled,
+            reply: tx_cancel,
+        });
+        state.expire_if_needed(now);
+        assert!(state.active.is_none());
+        assert_eq!(rx_cancel.try_recv().unwrap(), Err(ToolkitError::Cancelled));
+        assert!(
+            state
+                .handle_or_pass(json!({"jsonrpc":"2.0","id":"eq-cancel","result":{}}))
+                .is_none()
+        );
+
+        let unrelated = json!({"jsonrpc":"2.0","id":"clock-1","result":{}});
+        assert_eq!(state.handle_or_pass(unrelated.clone()), Some(unrelated));
+
+        let (tx_drop, rx_drop) = std::sync::mpsc::sync_channel(1);
+        state.active = Some(equipment_rpc::Pending {
+            id: "eq-drop".into(),
+            method: "inventory.snapshot".into(),
+            params: json!({}),
+            deadline: now + Duration::from_secs(10),
+            canceled: Arc::new(AtomicBool::new(false)),
+            reply: tx_drop,
+        });
+        drop(state);
+        assert_eq!(rx_drop.try_recv().unwrap(), Err(ToolkitError::Cancelled));
     }
 }

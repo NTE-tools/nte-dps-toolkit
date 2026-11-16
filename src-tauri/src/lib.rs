@@ -5,13 +5,11 @@ mod contract;
 mod desktop_runtime;
 mod diagnostics_runtime;
 mod encrypted_ini_service;
-mod equipment_operation_service;
 mod file_dialog;
 mod history_runtime;
 mod settings_service;
 mod state;
 mod team_import_service;
-mod update_runtime;
 mod windows;
 
 use state::{AppState, DesktopWindowKind};
@@ -76,22 +74,29 @@ pub fn run() {
             let island_window = app
                 .get_webview_window(windows::island::ISLAND_WINDOW_LABEL)
                 .expect("configured notification island window must exist");
+            let window_persistence = windows::window_position::WindowPersistenceRuntime::default();
             windows::main_dps::initialize(
                 &main_dps_window,
                 app.handle().clone(),
                 state.inner().clone(),
             );
-            windows::console::initialize(&console_window, state.inner())?;
-            windows::abyss_values::initialize(&abyss_values_window, state.inner())?;
+            windows::console::initialize(&console_window, state.inner(), &window_persistence)?;
+            windows::abyss_values::initialize(
+                &abyss_values_window,
+                state.inner(),
+                &window_persistence,
+            )?;
             windows::combat_details::initialize(
                 &character_details_window,
                 state.inner(),
                 state::MainDpsDetailKind::Character,
+                &window_persistence,
             )?;
             windows::combat_details::initialize(
                 &team_details_window,
                 state.inner(),
                 state::MainDpsDetailKind::Team,
+                &window_persistence,
             )?;
             windows::island::bind_close_to_hide(&island_window);
             if let Err(error) = island_window.set_focusable(false) {
@@ -121,12 +126,18 @@ pub fn run() {
             if let Err(error) = windows::hud::restore_content_position(&hud_window, &state) {
                 eprintln!("Tauri HUD position restore unavailable: {error}");
             }
-            if let Err(error) = windows::hud::track_native_width(&hud_window, &state) {
+            if let Err(error) =
+                windows::hud::track_native_width(&hud_window, &state, &window_persistence)
+            {
                 eprintln!("Tauri HUD native width persistence unavailable: {error}");
             }
-            if let Err(error) = windows::hud::track_native_position(&hud_window, &state) {
+            if let Err(error) =
+                windows::hud::track_native_position(&hud_window, &state, &window_persistence)
+            {
                 eprintln!("Tauri HUD native position persistence unavailable: {error}");
             }
+            let managed = app.manage(window_persistence);
+            debug_assert!(managed, "Window persistence runtime is managed once");
             #[cfg(windows)]
             match windows::passthrough_hotkey::HudPassthroughHotkeyRuntime::start(
                 app.handle().clone(),
@@ -153,6 +164,19 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            } else {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::new()
+                        .targets([tauri_plugin_log::Target::new(
+                            tauri_plugin_log::TargetKind::LogDir {
+                                file_name: Some("nte-dps-tool".to_owned()),
+                            },
+                        )])
+                        .max_file_size(1_000_000)
+                        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                        .level(log::LevelFilter::Warn)
                         .build(),
                 )?;
             }
@@ -312,6 +336,11 @@ pub fn run() {
                     log::warn!("Stream registry reset during application shutdown");
                 }
                 if let Some(runtime) = app.try_state::<history_runtime::HistoryRuntime>() {
+                    runtime.shutdown();
+                }
+                if let Some(runtime) =
+                    app.try_state::<windows::window_position::WindowPersistenceRuntime>()
+                {
                     runtime.shutdown();
                 }
             }

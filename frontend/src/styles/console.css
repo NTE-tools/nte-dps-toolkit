@@ -23,37 +23,15 @@
     background: transparent;
   }
 
-  .skills-workspace > aside {
+  .skills-sidebar {
     background: color-mix(in oklab, var(--muted) 35%, var(--card));
-  }
-
-  .console-page-stage[data-page="history"] [role="listbox"] {
-    background: var(--card);
-    border-radius: var(--radius-xl);
-  }
-
-  .character-data-workspace {
-    gap: var(--ui-section-gap);
-    margin: var(--ui-page-padding);
-  }
-
-  .character-data-workspace > aside,
-  .character-data-workspace > main {
-    overflow: hidden;
-    border: var(--ui-border-width) solid var(--border);
-    border-radius: var(--radius-xl);
-    background: var(--card);
-  }
-
-  .character-data-workspace > aside {
-    background: color-mix(in oklab, var(--muted) 25%, var(--card));
   }
 
   .packet-list {
     padding-block: 0.5rem;
   }
 
-  .packet-list > details:nth-child(even) {
+  .packet-row:nth-child(even) {
     background: color-mix(in oklab, var(--muted) 22%, transparent);
   }
 
@@ -64,7 +42,7 @@
     padding: var(--ui-page-padding);
   }
 
-  .diagnostics-sections > section {
+  .diagnostics-card {
     overflow: hidden;
     border: var(--ui-border-width) solid var(--border);
     border-radius: var(--radius-xl);

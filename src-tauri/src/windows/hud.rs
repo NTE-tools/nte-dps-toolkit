@@ -2,9 +2,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError},
     },
-    thread,
     time::Duration,
 };
 
@@ -13,23 +11,15 @@ use tauri::{LogicalSize, Size, WebviewWindow, WindowEvent};
 use nte_dps_tool::storage::config::{HUD_WIDTH_MAX, HUD_WIDTH_MIN};
 
 use crate::{
-    contract::CommandError, settings_service::SettingsServiceError, state::AppState,
-    windows::window_position,
+    contract::CommandError,
+    state::AppState,
+    windows::window_position::{self, DebouncedEvent, WindowPersistenceRuntime},
 };
 
 pub(crate) const HUD_WINDOW_LABEL: &str = "hud-spike";
 // Keep native edge-resize persistence aligned with the shared config debounce.
 const HUD_WIDTH_SAVE_DELAY: Duration = Duration::from_millis(350);
 const HUD_POSITION_SAVE_DELAY: Duration = Duration::from_millis(350);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DebouncedEvent<T> {
-    Changed(T),
-    Shutdown,
-}
-
-type NativeWidthEvent = DebouncedEvent<u16>;
-type NativePositionEvent = DebouncedEvent<[i32; 2]>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HudContentConstraints {
@@ -85,28 +75,30 @@ pub(crate) fn restore_content_position(
     window_position::restore_window_position(window, saved_position)
 }
 
-pub(crate) fn track_native_width(window: &WebviewWindow, state: &AppState) -> Result<(), String> {
+pub(crate) fn track_native_width(
+    window: &WebviewWindow,
+    state: &AppState,
+    persistence: &WindowPersistenceRuntime,
+) -> Result<(), String> {
     let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
     let scale_factor_bits = Arc::new(AtomicU64::new(scale_factor.to_bits()));
-    let (sender, receiver) = mpsc::channel();
     let persistence_state = state.clone();
-    thread::Builder::new()
-        .name("tauri-hud-width-save".to_owned())
-        .spawn(move || {
-            run_debounced_persistence(receiver, HUD_WIDTH_SAVE_DELAY, |width| {
-                if let Err(error) = persistence_state.set_hud_width(width) {
-                    log::error!("persist native HUD width failed: {error}");
-                }
-            });
-        })
-        .map_err(|error| error.to_string())?;
+    let sender = persistence.spawn_debounced(
+        "tauri-hud-width-save",
+        HUD_WIDTH_SAVE_DELAY,
+        move |width: u16| {
+            if let Err(error) = persistence_state.set_hud_width(width) {
+                log::error!("persist native HUD width failed: {error}");
+            }
+        },
+    )?;
 
     let event_scale_factor_bits = Arc::clone(&scale_factor_bits);
     window.on_window_event(move |event| match event {
         WindowEvent::Resized(size) => {
             let scale_factor = f64::from_bits(event_scale_factor_bits.load(Ordering::Acquire));
             if let Some(width) = logical_hud_width(size.width, scale_factor) {
-                let _ = sender.send(NativeWidthEvent::Changed(width));
+                let _ = sender.send(DebouncedEvent::Changed(width));
             }
         }
         WindowEvent::ScaleFactorChanged {
@@ -116,11 +108,11 @@ pub(crate) fn track_native_width(window: &WebviewWindow, state: &AppState) -> Re
         } => {
             event_scale_factor_bits.store(scale_factor.to_bits(), Ordering::Release);
             if let Some(width) = logical_hud_width(new_inner_size.width, *scale_factor) {
-                let _ = sender.send(NativeWidthEvent::Changed(width));
+                let _ = sender.send(DebouncedEvent::Changed(width));
             }
         }
         WindowEvent::Destroyed => {
-            let _ = sender.send(NativeWidthEvent::Shutdown);
+            let _ = sender.send(DebouncedEvent::Shutdown);
         }
         _ => {}
     });
@@ -130,26 +122,25 @@ pub(crate) fn track_native_width(window: &WebviewWindow, state: &AppState) -> Re
 pub(crate) fn track_native_position(
     window: &WebviewWindow,
     state: &AppState,
+    persistence: &WindowPersistenceRuntime,
 ) -> Result<(), String> {
-    let (sender, receiver) = mpsc::channel();
     let persistence_state = state.clone();
-    thread::Builder::new()
-        .name("tauri-hud-position-save".to_owned())
-        .spawn(move || {
-            run_debounced_persistence(receiver, HUD_POSITION_SAVE_DELAY, |position| {
-                if let Err(error) = persistence_state.set_hud_window_position(position) {
-                    log::error!("persist native HUD position failed: {error}");
-                }
-            });
-        })
-        .map_err(|error| error.to_string())?;
+    let sender = persistence.spawn_debounced(
+        "tauri-hud-position-save",
+        HUD_POSITION_SAVE_DELAY,
+        move |position: [i32; 2]| {
+            if let Err(error) = persistence_state.set_hud_window_position(position) {
+                log::error!("persist native HUD position failed: {error}");
+            }
+        },
+    )?;
 
     window.on_window_event(move |event| match event {
         WindowEvent::Moved(position) => {
-            let _ = sender.send(NativePositionEvent::Changed([position.x, position.y]));
+            let _ = sender.send(DebouncedEvent::Changed([position.x, position.y]));
         }
         WindowEvent::Destroyed => {
-            let _ = sender.send(NativePositionEvent::Shutdown);
+            let _ = sender.send(DebouncedEvent::Shutdown);
         }
         _ => {}
     });
@@ -164,33 +155,6 @@ fn logical_hud_width(physical_width: u32, scale_factor: f64) -> Option<u16> {
         .round()
         .clamp(f64::from(HUD_WIDTH_MIN), f64::from(HUD_WIDTH_MAX));
     Some(width as u16)
-}
-
-fn run_debounced_persistence<T: Copy>(
-    receiver: Receiver<DebouncedEvent<T>>,
-    save_delay: Duration,
-    mut persist: impl FnMut(T),
-) {
-    loop {
-        let mut pending = match receiver.recv() {
-            Ok(DebouncedEvent::Changed(value)) => value,
-            Ok(DebouncedEvent::Shutdown) | Err(_) => return,
-        };
-
-        loop {
-            match receiver.recv_timeout(save_delay) {
-                Ok(DebouncedEvent::Changed(value)) => pending = value,
-                Ok(DebouncedEvent::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                    persist(pending);
-                    return;
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    persist(pending);
-                    break;
-                }
-            }
-        }
-    }
 }
 
 pub(crate) fn sync_content_height(
@@ -306,9 +270,7 @@ pub(crate) fn set_passthrough(
     state: &AppState,
     enabled: bool,
 ) -> Result<(), CommandError> {
-    let _transaction = state
-        .lock_passthrough_transaction()
-        .map_err(passthrough_transaction_error)?;
+    let _transaction = state.lock_passthrough_transaction()?;
     set_passthrough_locked(window, state, enabled)
 }
 
@@ -316,9 +278,7 @@ pub(crate) fn toggle_passthrough(
     window: &WebviewWindow,
     state: &AppState,
 ) -> Result<(), CommandError> {
-    let _transaction = state
-        .lock_passthrough_transaction()
-        .map_err(passthrough_transaction_error)?;
+    let _transaction = state.lock_passthrough_transaction()?;
     set_passthrough_locked(window, state, !state.passthrough())
 }
 
@@ -347,10 +307,6 @@ fn set_passthrough_locked(
     Ok(())
 }
 
-fn passthrough_transaction_error(_error: SettingsServiceError) -> CommandError {
-    CommandError::passthrough_state_unavailable()
-}
-
 pub(crate) fn set_always_on_top(
     window: &WebviewWindow,
     state: &AppState,
@@ -366,7 +322,7 @@ pub(crate) fn set_always_on_top(
         if let Err(rollback_error) = window.set_always_on_top(previous) {
             log::error!("restore HUD always-on-top state failed: {rollback_error}");
         }
-        return Err(CommandError::hud_config_save_failed());
+        return Err(CommandError::from(error));
     }
     Ok(())
 }
@@ -410,45 +366,5 @@ mod tests {
         assert_eq!(logical_hud_width(8_000, 2.0), Some(HUD_WIDTH_MAX));
         assert_eq!(logical_hud_width(760, 0.0), None);
         assert_eq!(logical_hud_width(760, f64::NAN), None);
-    }
-
-    #[test]
-    fn native_resize_persistence_coalesces_to_the_latest_width() {
-        let (sender, receiver) = mpsc::channel();
-        sender
-            .send(NativeWidthEvent::Changed(420))
-            .expect("queue first width");
-        sender
-            .send(NativeWidthEvent::Changed(512))
-            .expect("queue latest width");
-        sender
-            .send(NativeWidthEvent::Shutdown)
-            .expect("queue shutdown");
-
-        let mut persisted = Vec::new();
-        run_debounced_persistence(receiver, Duration::from_secs(1), |width| {
-            persisted.push(width);
-        });
-
-        assert_eq!(persisted, vec![512]);
-    }
-
-    #[test]
-    fn native_resize_persistence_flushes_after_the_quiet_period() {
-        let (sender, receiver) = mpsc::channel();
-        sender
-            .send(NativeWidthEvent::Changed(420))
-            .expect("queue width");
-        let shutdown_sender = sender.clone();
-
-        let mut persisted = Vec::new();
-        run_debounced_persistence(receiver, Duration::ZERO, |width| {
-            persisted.push(width);
-            shutdown_sender
-                .send(NativeWidthEvent::Shutdown)
-                .expect("queue shutdown after persistence");
-        });
-
-        assert_eq!(persisted, vec![420]);
     }
 }

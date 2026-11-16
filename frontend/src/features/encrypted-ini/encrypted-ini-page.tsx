@@ -1,14 +1,13 @@
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import {
   PageHeader,
   PageTitle,
   PageDescription,
 } from "@/components/nte/page-layout";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import {
   ArrowDown,
   ArrowUp,
-  BadgeCheck,
   FileKey2,
   FolderOpen,
   LockKeyhole,
@@ -17,15 +16,7 @@ import {
   Search,
   Trash2,
   TriangleAlert,
-  X,
 } from "lucide-react";
-
-import {
-  Alert,
-  AlertAction,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogBackdrop,
@@ -291,9 +282,13 @@ export function EncryptedIniPage() {
             ref={textareaRef}
             aria-label={t("Decrypted INI plaintext")}
             className="size-full resize-none overflow-auto bg-transparent p-4 font-mono text-sm leading-6 outline-none select-text [tab-size:4] placeholder:text-muted-foreground/70 focus:ring-3 focus:ring-inset focus:ring-ring/20"
-            placeholder={t(
-              "After opening an encrypted INI, the decrypted plaintext appears here.",
-            )}
+            placeholder={
+              opened || plaintext.length > 0
+                ? t(
+                    "After opening an encrypted INI, the decrypted plaintext appears here.",
+                  )
+                : undefined
+            }
             spellCheck={false}
             wrap="off"
             value={plaintext}
@@ -359,34 +354,13 @@ function EncryptedIniFloatingNotice({
   notice: EncryptedIniNotice;
   onClose: () => void;
 }) {
-  return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-4 z-[100] flex justify-center px-4">
-      <Alert
-        className="pointer-events-auto w-full max-w-lg bg-background pr-10 shadow-xl"
-        variant={notice.kind === "error" ? "destructive" : "default"}
-      >
-        {notice.kind === "error" ? (
-          <TriangleAlert aria-hidden="true" />
-        ) : (
-          <BadgeCheck aria-hidden="true" />
-        )}
-        <AlertTitle>{t(notice.titleKey)}</AlertTitle>
-        <AlertDescription>
-          {tf(notice.messageKey, notice.messageArguments)}
-        </AlertDescription>
-        <AlertAction>
-          <Button
-            aria-label={t("Dismiss")}
-            size="icon-xs"
-            variant="ghost"
-            onClick={onClose}
-          >
-            <X aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
-    </div>,
-    document.body,
+  return (
+    <FloatingActionNotice
+      status={notice.kind === "error" ? "error" : "success"}
+      message={t(notice.titleKey)}
+      detail={tf(notice.messageKey, notice.messageArguments)}
+      onDismiss={onClose}
+    />
   );
 }
 
@@ -408,19 +382,24 @@ function EncryptedIniConfirmation({
     >
       <AlertDialogPortal>
         <AlertDialogBackdrop className="z-[110]" />
-        <AlertDialogPopup className="top-4 left-1/2 z-[111] grid w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 grid-cols-[0_1fr] gap-y-0.5 rounded-lg border bg-background px-4 py-3 text-sm shadow-xl has-[>svg]:grid-cols-[calc(var(--spacing)*4)_1fr] has-[>svg]:gap-x-3">
-          <TriangleAlert aria-hidden="true" />
-          <AlertDialogTitle className="col-start-2 text-sm">
-            {t(action === "reload" ? "Confirm Reload" : "Confirm Clear")}
-          </AlertDialogTitle>
-          <AlertDialogDescription className="col-start-2">
+        <AlertDialogPopup className="top-1/2 left-1/2 z-[111] flex w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-xl">
+          <div className="flex items-center gap-2">
+            <TriangleAlert
+              className="size-5 shrink-0 text-destructive"
+              aria-hidden="true"
+            />
+            <AlertDialogTitle>
+              {t(action === "reload" ? "Confirm Reload" : "Confirm Clear")}
+            </AlertDialogTitle>
+          </div>
+          <AlertDialogDescription>
             {t("Unsaved changes will be discarded.")}
           </AlertDialogDescription>
-          <div className="col-start-2 mt-2 flex justify-end gap-2">
-            <AlertDialogClose render={<Button size="sm" variant="outline" />}>
+          <div className="flex justify-end gap-2">
+            <AlertDialogClose render={<Button variant="outline" autoFocus />}>
               {t("Cancel")}
             </AlertDialogClose>
-            <Button size="sm" onClick={onConfirm}>
+            <Button variant="destructive" onClick={onConfirm}>
               {t("Confirm")}
             </Button>
           </div>

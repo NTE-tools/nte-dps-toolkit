@@ -30,7 +30,6 @@ export function useSettings() {
   const mounted = useRef(true);
   const mutationPending = useRef(false);
   const mutationQueue = useRef<Promise<void>>(Promise.resolve());
-  const loadGeneration = useRef(0);
   const acceptedGeneration = useRef<string | null>(null);
 
   useEffect(() => {
@@ -54,7 +53,6 @@ export function useSettings() {
       if (!accepted) return;
       acceptedGeneration.current = snapshot.generation;
       applySettingsPresentation(snapshot.interface);
-      loadGeneration.current += 1;
       setState({ status: "ready", snapshot });
     },
     [],
@@ -77,19 +75,17 @@ export function useSettings() {
   }, [applySnapshot]);
 
   useEffect(() => {
+    let active = true;
     const unsubscribe = settingsClient.subscribe(
       (snapshot) => {
-        if (mounted.current) {
-          applySnapshot(snapshot);
-        }
+        if (active) applySnapshot(snapshot);
       },
       (error) => {
-        if (mounted.current) {
-          setState({ status: "error", error });
-        }
+        if (active) setState({ status: "error", error });
       },
     );
     return () => {
+      active = false;
       void unsubscribe().catch((error: unknown) => {
         console.error("settings subscription cleanup failed", error);
       });

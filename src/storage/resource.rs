@@ -11,35 +11,7 @@ use flate2::read::ZlibDecoder;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_resources.rs"));
 
-#[cfg(feature = "desktop")]
-const MODS_PLUGIN_PATH: &str = "plugins/dwmapi.dll";
 const MAX_RESOURCE_FILE_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(feature = "desktop")]
-const MAX_MODS_PLUGIN_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(feature = "desktop")]
-const MODS_PLUGIN_REQUIRED_MOD_RUNTIME_SYMBOLS: [&[u8]; 21] = [
-    b"NTE_DPS_TOOL_MODS_PLUGIN_V1",
-    b"game.session",
-    b"game.player_controller",
-    b"game.player_state",
-    b"combat_clock.pause_mask",
-    b"combat_clock.state_flags",
-    b"memory.read_f32_milli",
-    b"memory.read_fname_hash",
-    b"cache.get",
-    b"cache.remember",
-    b"memory.write_u64",
-    b"unreal.reflection",
-    b"unreal.find_function",
-    b"unreal.params_clear",
-    b"unreal.params_write_u64",
-    b"unreal.params_read_u64",
-    b"unreal.call",
-    b"process.event",
-    b"unreal.watch",
-    b"unreal.unwatch",
-    b"event.next",
-];
 
 #[cfg(all(test, not(feature = "external_resources")))]
 fn bundled_resource(path: &str) -> Option<Cow<'static, [u8]>> {
@@ -50,48 +22,6 @@ pub(crate) fn resource_file_path(path: &Path) -> Option<PathBuf> {
     disk_resource_candidates(path)
         .into_iter()
         .find(|candidate| candidate.is_file())
-}
-
-#[cfg(feature = "desktop")]
-pub fn read_mods_plugin() -> std::io::Result<Option<Vec<u8>>> {
-    let relative_path = Path::new(MODS_PLUGIN_PATH);
-    let candidates = [
-        super::paths::software_dir().join(relative_path),
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path),
-    ];
-    read_first_compatible_mods_plugin(&candidates)
-}
-
-#[cfg(feature = "desktop")]
-fn read_first_compatible_mods_plugin(candidates: &[PathBuf]) -> std::io::Result<Option<Vec<u8>>> {
-    let mut incompatible = None;
-    for candidate in candidates {
-        match read_file_bytes_bounded_io(candidate, MAX_MODS_PLUGIN_BYTES) {
-            Ok(bytes) if mods_plugin_supports_bundled_mods(&bytes) => return Ok(Some(bytes)),
-            Ok(_) => {
-                incompatible.get_or_insert(candidate);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if let Some(path) = incompatible {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "{} does not provide the Mod runtime APIs required by the bundled scripts",
-                path.display()
-            ),
-        ));
-    }
-    Ok(None)
-}
-
-#[cfg(feature = "desktop")]
-fn mods_plugin_supports_bundled_mods(plugin: &[u8]) -> bool {
-    MODS_PLUGIN_REQUIRED_MOD_RUNTIME_SYMBOLS
-        .iter()
-        .all(|symbol| plugin.windows(symbol.len()).any(|window| window == *symbol))
 }
 
 pub(crate) fn resource_exists(path: &Path) -> bool {
@@ -557,83 +487,6 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
         std::fs::remove_file(path).expect("remove binary resource fixture");
-    }
-
-    #[test]
-    #[cfg(feature = "desktop")]
-    fn mods_plugin_loader_reads_the_first_compatible_candidate() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "nte-plugin-source-test-{}-{unique}",
-            std::process::id()
-        ));
-        let missing = root.join("missing/dwmapi.dll");
-        let plugin = root.join("plugins/dwmapi.dll");
-        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
-        std::fs::write(&plugin, compatible_mods_plugin()).unwrap();
-
-        let bytes = read_first_compatible_mods_plugin(&[missing, plugin]).unwrap();
-
-        assert_eq!(bytes.as_deref(), Some(compatible_mods_plugin().as_slice()));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    #[cfg(feature = "desktop")]
-    fn mods_plugin_loader_skips_an_incompatible_runtime_package() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "nte-plugin-compatibility-test-{}-{unique}",
-            std::process::id()
-        ));
-        let stale = root.join("stale/dwmapi.dll");
-        let current = root.join("current/dwmapi.dll");
-        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
-        std::fs::write(&stale, b"old plugin").unwrap();
-        std::fs::write(&current, compatible_mods_plugin()).unwrap();
-
-        let bytes = read_first_compatible_mods_plugin(&[stale, current]).unwrap();
-
-        assert_eq!(bytes.as_deref(), Some(compatible_mods_plugin().as_slice()));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    #[cfg(feature = "desktop")]
-    fn mods_plugin_loader_reports_an_incompatible_runtime_package() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "nte-plugin-incompatible-test-{}-{unique}",
-            std::process::id()
-        ));
-        let stale = root.join("plugins/dwmapi.dll");
-        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-        std::fs::write(&stale, b"old plugin").unwrap();
-
-        let error = read_first_compatible_mods_plugin(&[stale])
-            .expect_err("an incompatible plugin should be rejected");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("Mod runtime APIs"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(feature = "desktop")]
-    fn compatible_mods_plugin() -> Vec<u8> {
-        MODS_PLUGIN_REQUIRED_MOD_RUNTIME_SYMBOLS
-            .iter()
-            .flat_map(|symbol| symbol.iter().copied().chain([0]))
-            .collect()
     }
 
     #[test]

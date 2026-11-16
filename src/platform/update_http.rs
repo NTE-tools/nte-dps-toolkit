@@ -559,11 +559,15 @@ impl ParsedHttpsUrl {
                 "embedded URL credentials are rejected".to_owned(),
             ));
         }
+        // SAFETY: `WinHttpCrackUrl` populated `lpszHostName`/`dwHostNameLength` pointing into the
+        // still-live `wide_url` buffer owned by this function.
         let host = unsafe {
             wide_component(components.lpszHostName, components.dwHostNameLength, "host")?
         };
+        // SAFETY: `WinHttpCrackUrl` populated `lpszUrlPath`/`dwUrlPathLength` pointing into `wide_url`.
         let mut object =
             unsafe { wide_component(components.lpszUrlPath, components.dwUrlPathLength, "path")? };
+        // SAFETY: `WinHttpCrackUrl` populated `lpszExtraInfo`/`dwExtraInfoLength` pointing into `wide_url`.
         let extra = unsafe {
             wide_component(
                 components.lpszExtraInfo,
@@ -586,6 +590,11 @@ impl ParsedHttpsUrl {
     }
 }
 
+/// # Safety
+///
+/// When `length` is non-zero and not `u32::MAX`, `pointer` must either be null or point to
+/// `length` readable, aligned `u16` elements valid for the duration of this call (as returned
+/// by `WinHttpCrackUrl` into a live caller-owned wide URL buffer).
 unsafe fn wide_component(
     pointer: *mut u16,
     length: u32,
@@ -597,7 +606,7 @@ unsafe fn wide_component(
     if pointer.is_null() || length == u32::MAX {
         return Err(HttpError::InvalidUrl(format!("URL {name} is invalid")));
     }
-    // SAFETY: WinHttpCrackUrl returned this pointer/length pair into the caller-owned URL buffer.
+    // SAFETY: Caller guarantees `pointer` is valid for `length` `u16` elements for this call.
     Ok(unsafe { std::slice::from_raw_parts(pointer, length as usize) }.to_vec())
 }
 

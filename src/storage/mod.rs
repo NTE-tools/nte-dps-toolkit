@@ -11,8 +11,6 @@ pub mod effect_text;
 pub mod history;
 pub mod i18n;
 pub mod io_util;
-#[cfg(feature = "desktop")]
-pub mod mod_scripts;
 pub mod paths;
 pub mod resource;
 #[cfg(feature = "desktop")]

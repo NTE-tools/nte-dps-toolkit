@@ -1,8 +1,8 @@
 import { lazy, Suspense } from "react";
-import { Power, Puzzle } from "lucide-react";
+import { Power, Puzzle, TriangleAlert } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ActionNotice } from "@/components/nte/action-notice";
 import { usePluginFormCatalog } from "./plugin-form-catalog";
 import { t } from "@/lib/i18n";
 import type { PluginPanel } from "@/lib/tauri/generated/PluginPanel";
@@ -85,7 +85,10 @@ export function PluginControls({
       panel.connectionIdentity ? (
         entry?.error ? (
           <div className="space-y-3">
-            <ActionNotice status="error" message={t(entry.error.messageKey)} />
+            <Alert variant="destructive">
+              <TriangleAlert aria-hidden="true" />
+              <AlertDescription>{t(entry.error.messageKey)}</AlertDescription>
+            </Alert>
             <Button
               variant="outline"
               disabled={pending}

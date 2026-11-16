@@ -32,7 +32,7 @@ export async function bootstrapCharacterAvatarCatalog(): Promise<void> {
   replaceCharacterAvatarCatalog(snapshot.records);
 }
 
-export function replaceCharacterAvatarCatalog(
+function replaceCharacterAvatarCatalog(
   records: readonly Pick<CharacterDataRecordSnapshot, "id" | "avatar">[],
 ): void {
   useCharacterAvatarCatalog.setState(
@@ -45,7 +45,7 @@ export function replaceCharacterAvatarCatalog(
   );
 }
 
-export function characterAvatarPathUrl(avatar: string): string | null {
+function characterAvatarPathUrl(avatar: string): string | null {
   return imageByFileName.get(fileName(avatar.trim())) ?? null;
 }
 

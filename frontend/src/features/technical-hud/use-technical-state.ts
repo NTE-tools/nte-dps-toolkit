@@ -117,10 +117,26 @@ export function useTechnicalState() {
   const clearActionNotice = useCallback(() => setActionNotice(null), []);
 
   useEffect(() => {
-    void technicalClient.getSnapshot().then(applySnapshot).catch(applyError);
-    const unsubscribe = technicalClient.subscribe(applySnapshot, applyError);
+    let active = true;
+    void technicalClient
+      .getSnapshot()
+      .then((next) => {
+        if (active) applySnapshot(next);
+      })
+      .catch((error) => {
+        if (active) applyError(error);
+      });
+    const unsubscribe = technicalClient.subscribe(
+      (next) => {
+        if (active) applySnapshot(next);
+      },
+      (error) => {
+        if (active) applyError(error);
+      },
+    );
 
     return () => {
+      active = false;
       void unsubscribe().catch((error: unknown) => {
         console.error("technical subscription cleanup failed", error);
       });

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useWindowMotion } from "@/components/nte/window-motion-context";
 import { Button } from "@/components/ui/button";
@@ -148,7 +148,23 @@ function AppearancePopover({
 }) {
   const presentation = useSettingsPresentation();
   const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [draftOpacity, setDraftOpacity] = useState(() =>
+    Math.round(snapshot.appearance.opacity * 100),
+  );
+  const snapshotOpacityPercent = Math.round(snapshot.appearance.opacity * 100);
+  useEffect(() => {
+    setDraftOpacity(snapshotOpacityPercent);
+  }, [snapshotOpacityPercent]);
   useCloseOnWindowBlur(appearanceOpen, () => setAppearanceOpen(false));
+  const commitOpacity = (nextPercent: number) => {
+    if (nextPercent === snapshotOpacityPercent) return;
+    void mutate("appearance", () =>
+      mainDpsClient.setAppearance(
+        snapshot.appearance.darkMode,
+        nextPercent / 100,
+      ),
+    );
+  };
   return (
     <Popover
       modal="trap-focus"
@@ -162,7 +178,7 @@ function AppearancePopover({
         <PopoverPositioner align="end" side="bottom">
           <PopoverPopup className="flex w-44 flex-col gap-2 p-3">
             <PopoverTitle className="text-xs font-normal text-muted-foreground">
-              {t("Theme Preset")}
+              {t("Appearance")}
             </PopoverTitle>
             <div className="grid grid-cols-2 gap-2">
               {([false, true] as const).map((dark) => (
@@ -196,30 +212,34 @@ function AppearancePopover({
             <label className="mt-1 flex flex-col gap-1 text-xs text-muted-foreground">
               <span className="flex justify-between">
                 <span>{t("Opacity")}</span>
-                <span>{Math.round(snapshot.appearance.opacity * 100)}%</span>
+                <span className="tabular-nums">{draftOpacity}%</span>
               </span>
               <input
                 type="range"
                 min="35"
                 max="100"
-                defaultValue={Math.round(snapshot.appearance.opacity * 100)}
+                value={draftOpacity}
+                onChange={(event) =>
+                  setDraftOpacity(Number(event.currentTarget.value))
+                }
                 onPointerUp={(event) =>
-                  void mutate("appearance", () =>
-                    mainDpsClient.setAppearance(
-                      snapshot.appearance.darkMode,
-                      Number(event.currentTarget.value) / 100,
-                    ),
-                  )
+                  commitOpacity(Number(event.currentTarget.value))
                 }
                 onKeyUp={(event) => {
-                  if (event.key === "ArrowLeft" || event.key === "ArrowRight")
-                    void mutate("appearance", () =>
-                      mainDpsClient.setAppearance(
-                        snapshot.appearance.darkMode,
-                        Number(event.currentTarget.value) / 100,
-                      ),
-                    );
+                  if (
+                    event.key === "ArrowLeft" ||
+                    event.key === "ArrowRight" ||
+                    event.key === "ArrowUp" ||
+                    event.key === "ArrowDown" ||
+                    event.key === "Home" ||
+                    event.key === "End"
+                  ) {
+                    commitOpacity(Number(event.currentTarget.value));
+                  }
                 }}
+                onBlur={(event) =>
+                  commitOpacity(Number(event.currentTarget.value))
+                }
               />
             </label>
             <PopoverClose className="sr-only">{t("Close")}</PopoverClose>

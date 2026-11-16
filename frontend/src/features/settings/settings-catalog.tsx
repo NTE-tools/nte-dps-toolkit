@@ -28,6 +28,15 @@ import {
   Users,
 } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogBackdrop,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogPopup,
+  AlertDialogPortal,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -57,8 +66,6 @@ import {
   updateProgressPercent,
 } from "@/lib/update-presentation";
 import { cn } from "@/lib/utils";
-
-import { settingsSectionPending } from "./settings-view-model";
 
 const LANGUAGE_OPTIONS = [
   { value: "zh-CN", label: "简体中文" },
@@ -150,6 +157,7 @@ export function SettingsCatalog({
   actions: SettingsCatalogActions;
   hud: ReactNode;
 }) {
+  const pending = pendingAction !== null;
   return (
     <>
       {/* Keep drafts mounted when switching categories. */}
@@ -162,12 +170,12 @@ export function SettingsCatalog({
         <PreferencesGrid>
           <InterfaceSettingsCard
             snapshot={snapshot}
-            pending={settingsSectionPending(pendingAction, "interface")}
+            pending={pending}
             actions={actions}
           />
           <SoftwareUpdateCard
             snapshot={snapshot}
-            pending={settingsSectionPending(pendingAction, "update")}
+            pending={pending}
             actions={actions}
           />
         </PreferencesGrid>
@@ -183,16 +191,10 @@ export function SettingsCatalog({
           <div className="ui-section-stack">
             <MainDpsDisplayCard
               snapshot={snapshot}
-              pending={settingsSectionPending(
-                pendingAction,
-                "main-dps-display",
-              )}
+              pending={pending}
               actions={actions}
             />
-            <LayoutProfilesCard
-              pending={settingsSectionPending(pendingAction, "layout")}
-              actions={actions}
-            />
+            <LayoutProfilesCard pending={pending} actions={actions} />
           </div>
         </PreferencesGrid>
       </Tabs.Panel>
@@ -205,24 +207,21 @@ export function SettingsCatalog({
         <PreferencesGrid>
           <ParseSettingsCard
             snapshot={snapshot}
-            pending={settingsSectionPending(pendingAction, "capture")}
+            pending={pending}
             actions={actions}
           />
           <div className="ui-section-stack">
             <TeamDataCard
               snapshot={snapshot}
-              pending={settingsSectionPending(pendingAction, "team-data")}
+              pending={pending}
               actions={actions}
             />
             <CaptureFilesCard
               snapshot={snapshot}
-              pending={settingsSectionPending(pendingAction, "capture-files")}
+              pending={pending}
               actions={actions}
             />
-            <AbyssValuesCard
-              pending={settingsSectionPending(pendingAction, "abyss-values")}
-              actions={actions}
-            />
+            <AbyssValuesCard pending={pending} actions={actions} />
           </div>
         </PreferencesGrid>
       </Tabs.Panel>
@@ -279,6 +278,22 @@ function InterfaceSettingsCard({
           }
           options={LANGUAGE_OPTIONS.map((option) => ({ ...option }))}
         />
+      </SettingsRow>
+      <SettingsRow labelKey="Appearance">
+        <div className="inline-flex rounded-lg bg-muted p-1">
+          {([false, true] as const).map((dark) => (
+            <Button
+              key={String(dark)}
+              size="sm"
+              variant={settings.darkMode === dark ? "outline" : "ghost"}
+              aria-pressed={settings.darkMode === dark}
+              disabled={pending}
+              onClick={() => void save({ darkMode: dark })}
+            >
+              {t(dark ? "Dark" : "Light")}
+            </Button>
+          ))}
+        </div>
       </SettingsRow>
       <SettingsRow labelKey="Theme Preset">
         <NativeSelect
@@ -451,11 +466,7 @@ function SoftwareUpdateCard({
                 onClick={() => void actions.downloadUpdate(available.component)}
               >
                 <Download aria-hidden="true" />
-                {t(
-                  available.component === "app"
-                    ? "Download application update"
-                    : "Download Mod loader update",
-                )}
+                {t("Download application update")}
               </Button>
             </div>
           </section>
@@ -509,11 +520,7 @@ function SoftwareUpdateCard({
                 disabled={pending || !update.installEnabled}
                 onClick={() => void actions.installUpdate()}
               >
-                {t(
-                  update.prepared.component === "app"
-                    ? "Install and restart"
-                    : "Install Mod loader update",
-                )}
+                {t("Install and restart")}
               </Button>
             </div>
             {update.installBlockedMessageKey ? (
@@ -970,6 +977,7 @@ function CaptureFilesCard({
   pending: boolean;
   actions: SettingsCatalogActions;
 }) {
+  const [confirmClear, setConfirmClear] = useState(false);
   return (
     <Card>
       <CardHeader>
@@ -998,7 +1006,7 @@ function CaptureFilesCard({
           type="button"
           variant="destructive"
           disabled={pending || snapshot.captureFiles.count === 0}
-          onClick={() => void actions.clearCaptureFiles()}
+          onClick={() => setConfirmClear(true)}
         >
           <Trash2 aria-hidden="true" />
           {t("Clear")}
@@ -1009,6 +1017,43 @@ function CaptureFilesCard({
           "Live capture writes raw frames to logs/nte_raw_*.pcapng; clearing does not affect stats or history.",
         )}
       </CardFooter>
+      <AlertDialog
+        open={confirmClear}
+        onOpenChange={(open) => {
+          if (!pending) setConfirmClear(open);
+        }}
+      >
+        <AlertDialogPortal>
+          <AlertDialogBackdrop />
+          <AlertDialogPopup className="top-1/2 left-1/2 flex w-[min(90vw,30rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-xl">
+            <AlertDialogTitle>{t("Clear capture files?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                "Live capture writes raw frames to logs/nte_raw_*.pcapng; clearing does not affect stats or history.",
+              )}
+            </AlertDialogDescription>
+            <div className="flex justify-end gap-2">
+              <AlertDialogClose
+                render={
+                  <Button variant="outline" autoFocus disabled={pending} />
+                }
+              >
+                {t("Cancel")}
+              </AlertDialogClose>
+              <Button
+                variant="destructive"
+                disabled={pending}
+                onClick={() => {
+                  setConfirmClear(false);
+                  void actions.clearCaptureFiles();
+                }}
+              >
+                {t("Clear")}
+              </Button>
+            </div>
+          </AlertDialogPopup>
+        </AlertDialogPortal>
+      </AlertDialog>
     </Card>
   );
 }
@@ -1124,13 +1169,13 @@ function LabeledSwitch({
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-(--ui-control-height) min-w-0 items-center gap-3">
+    <label className="flex min-h-(--ui-control-height) min-w-0 flex-1 items-center justify-between gap-3">
+      <span className="min-w-0 text-sm">{t(labelKey)}</span>
       <Switch
         checked={checked}
         disabled={disabled}
         onCheckedChange={onCheckedChange}
       />
-      <span className="min-w-0 text-sm">{t(labelKey)}</span>
     </label>
   );
 }

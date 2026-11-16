@@ -33,7 +33,7 @@ pub(crate) fn set_window_always_on_top(
         log::error!("save per-window always-on-top preference failed: {error}");
         let _ = window.set_always_on_top(previous);
         reassert_main_dps_opacity(window, state, kind, "always-on-top rollback");
-        return Err(CommandError::hud_config_save_failed());
+        return Err(CommandError::from(error));
     }
     Ok(())
 }

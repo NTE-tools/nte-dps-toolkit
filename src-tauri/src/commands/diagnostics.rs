@@ -2,7 +2,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nte_dps_tool::{
     core::{
-        CoreError, CoreErrorCode,
         diagnostics::run_capture_diagnostics,
         live_capture::{CaptureReplayKind, LiveCapturePhase},
     },
@@ -247,27 +246,10 @@ fn ensure_inactive(state: &AppState) -> Result<(), CommandError> {
     }
 }
 
-fn capture_error(error: CoreError) -> CommandError {
-    let message_key = match error.code {
-        CoreErrorCode::CaptureAlreadyRunning => {
-            "Stop capture or replay first, then use diagnostics file actions"
-        }
-        CoreErrorCode::NpcapNotFound => "Npcap device enumeration failed",
-        CoreErrorCode::GameProcessNotFound => "No active HTGame.exe connection detected",
-        CoreErrorCode::CaptureDeviceNotFound => "The selected capture device is unavailable",
-        CoreErrorCode::SystemProbeFailed => "Failed to start capture replay",
-        CoreErrorCode::CaptureNotRunning => "No live capture task right now",
-        CoreErrorCode::CaptureStateUnavailable => {
-            return CommandError::from(error);
-        }
-    };
-    CommandError::new("capture_operation_failed", message_key)
-}
-
 fn replay_import_error(error: ReplayImportError) -> CommandError {
     match error {
         ReplayImportError::RuntimeUnavailable => CommandError::replay_import_runtime_unavailable(),
-        ReplayImportError::Capture(error) => capture_error(error),
+        ReplayImportError::Capture(error) => CommandError::from(error),
         ReplayImportError::JsonImport(error) => {
             CommandError::new(error.stable_code(), "Failed to start capture replay")
         }
@@ -294,18 +276,19 @@ fn timestamp_suffix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nte_dps_tool::core::{CoreError, CoreErrorCode};
 
     #[test]
     fn core_error_mapping_keeps_private_details_out_of_the_contract() {
-        let error = capture_error(CoreError::new(
+        let error = CommandError::from(CoreError::new(
             CoreErrorCode::CaptureDeviceNotFound,
             r#"\Device\NPF_{private}"#,
         ));
 
-        assert_eq!(error.code, "capture_operation_failed");
+        assert_eq!(error.code, "capture_device_not_found");
         assert_eq!(
             error.message_key,
-            "The selected capture device is unavailable"
+            "No matching capture device, cannot locate the game connection"
         );
         assert!(error.message_arguments.is_empty());
     }

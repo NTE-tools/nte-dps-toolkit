@@ -64,7 +64,7 @@ impl AppState {
     pub(super) fn presentation_mode_snapshot(&self) -> PresentationModeSnapshot {
         let outgoing_revision = self.0.live_capture.outgoing_hit_revision();
         let history_revision = self.history_revision();
-        let (mut mode, recovered) = self.0.presentation.lock_mode();
+        let mut mode = self.0.presentation.lock_mode();
         let stale_selection = mode.selected_round.as_ref().is_some_and(|selection| {
             selection.history_revision != history_revision
                 || (mode.paused.is_none() && outgoing_revision != mode.selected_outgoing_revision)
@@ -77,7 +77,7 @@ impl AppState {
             selected_round: mode.selected_round.clone(),
         };
         drop(mode);
-        if recovered || stale_selection {
+        if stale_selection {
             self.0.presentation.publish_technical_and_main();
         }
         snapshot
@@ -115,12 +115,7 @@ impl AppState {
         &self,
         paused: bool,
     ) -> Result<bool, PresentationError> {
-        let (mut mode, recovered) = self.0.presentation.lock_mode();
-        if recovered {
-            drop(mode);
-            self.0.presentation.publish_technical_and_main();
-            return Err(PresentationError::StateUnavailable);
-        }
+        let mut mode = self.0.presentation.lock_mode();
         if mode.paused.is_some() == paused {
             return Ok(false);
         }
@@ -154,12 +149,7 @@ impl AppState {
             })
             .map_err(PresentationError::Capture)?
             .map_err(PresentationError::Capture)?;
-        let (mut mode, recovered) = self.0.presentation.lock_mode();
-        if recovered {
-            drop(mode);
-            self.0.presentation.publish_technical_and_main();
-            return Err(PresentationError::StateUnavailable);
-        }
+        let mut mode = self.0.presentation.lock_mode();
         if mode.paused.is_some() {
             return Ok(false);
         }
@@ -242,12 +232,7 @@ impl AppState {
         {
             return Ok(false);
         }
-        let (mode, recovered) = self.0.presentation.lock_mode();
-        if recovered {
-            drop(mode);
-            self.0.presentation.publish_technical_and_main();
-            return Err(PresentationError::StateUnavailable);
-        }
+        let mode = self.0.presentation.lock_mode();
         if mode.selected_round.as_ref().is_some_and(|value| {
             Some(value.record_id.as_str()) == record_id.as_deref()
                 && value.history_revision == history_revision
@@ -285,12 +270,7 @@ impl AppState {
             }
             None => None,
         };
-        let (mut mode, recovered) = self.0.presentation.lock_mode();
-        if recovered {
-            drop(mode);
-            self.0.presentation.publish_technical_and_main();
-            return Err(PresentationError::StateUnavailable);
-        }
+        let mut mode = self.0.presentation.lock_mode();
         if self.history_revision() != history_revision
             || self
                 .0
@@ -331,11 +311,12 @@ impl AppState {
 
     fn load_main_round_index(&self) -> Arc<Vec<HistoryRoundIndex>> {
         let revision = self.history_revision();
-        let cache = lock_or_reset(
-            &self.0.history.round_cache,
-            "History round index cache was discarded after an interrupted update",
-        )
-        .0;
+        let cache = self
+            .0
+            .history
+            .round_cache
+            .lock()
+            .expect("history round index cache lock");
         if cache.revision == Some(revision) {
             return Arc::clone(&cache.index);
         }
@@ -351,11 +332,12 @@ impl AppState {
                 .map(HistoryRoundIndex::from_storage)
                 .collect(),
         );
-        let mut cache = lock_or_reset(
-            &self.0.history.round_cache,
-            "History round index cache was discarded after an interrupted update",
-        )
-        .0;
+        let mut cache = self
+            .0
+            .history
+            .round_cache
+            .lock()
+            .expect("history round index cache lock");
         if self.history_revision() == revision {
             cache.index = Arc::clone(&loaded);
             cache.revision = Some(revision);
@@ -385,8 +367,8 @@ impl AppState {
 
         let revision = self.main_dps_stream_revision()?;
         let key = MainReadoutCacheKey { revision };
-        let (cache, recovered) = self.0.presentation.lock_main_readout_cache();
-        if !recovered && let Some(cached) = cache.iter().find(|cached| cached.key == key) {
+        let cache = self.0.presentation.lock_main_readout_cache();
+        if let Some(cached) = cache.iter().find(|cached| cached.key == key) {
             return Ok(cached.readout.as_ref().clone());
         }
         drop(cache);
@@ -403,7 +385,7 @@ impl AppState {
             return Ok(readout);
         }
         let readout = Arc::new(readout);
-        let (mut cache, _) = self.0.presentation.lock_main_readout_cache();
+        let mut cache = self.0.presentation.lock_main_readout_cache();
         if let Some(cached) = cache.iter().find(|cached| cached.key == key) {
             return Ok(cached.readout.as_ref().clone());
         }
@@ -421,16 +403,11 @@ impl AppState {
     }
 
     pub(crate) fn main_dps_detail_request(&self, kind: MainDpsDetailKind) -> MainDpsDetailRequest {
-        let (details, recovered) = self.0.presentation.lock_details();
-        let request = match kind {
+        let details = self.0.presentation.lock_details();
+        match kind {
             MainDpsDetailKind::Character => details.character.clone(),
             MainDpsDetailKind::Team => details.team.clone(),
-        };
-        drop(details);
-        if recovered {
-            self.0.presentation.publish_main();
         }
-        request
     }
 
     pub(crate) fn main_dps_detail_cache_get(
@@ -448,10 +425,7 @@ impl AppState {
             offset,
             limit,
         };
-        let (cache, recovered) = self.0.presentation.lock_cache();
-        if recovered {
-            return None;
-        }
+        let cache = self.0.presentation.lock_cache();
         cache
             .iter()
             .find(|cache| cache.key == key)
@@ -474,7 +448,7 @@ impl AppState {
             offset,
             limit,
         };
-        let (mut cache, _) = self.0.presentation.lock_cache();
+        let mut cache = self.0.presentation.lock_cache();
         cache.retain(|entry| entry.key != key);
         cache.push(MainDpsDetailCache { key, snapshot });
         if cache.len() > MAIN_DPS_DETAIL_CACHE_CAPACITY {
@@ -488,12 +462,7 @@ impl AppState {
         kind: MainDpsDetailKind,
         request: MainDpsDetailRequest,
     ) -> Result<bool, PresentationError> {
-        let (mut details, recovered) = self.0.presentation.lock_details();
-        if recovered {
-            drop(details);
-            self.0.presentation.publish_main();
-            return Err(PresentationError::StateUnavailable);
-        }
+        let mut details = self.0.presentation.lock_details();
         let current = match kind {
             MainDpsDetailKind::Character => &mut details.character,
             MainDpsDetailKind::Team => &mut details.team,
@@ -508,13 +477,7 @@ impl AppState {
     }
 
     pub(super) fn abyss_presentation_snapshot(&self) -> AbyssPresentationState {
-        let (abyss, recovered) = self.0.presentation.lock_abyss();
-        let snapshot = *abyss;
-        drop(abyss);
-        if recovered {
-            self.0.presentation.publish_technical_and_main();
-        }
-        snapshot
+        *self.0.presentation.lock_abyss()
     }
 
     pub(crate) fn with_main_dps_detail_state<T>(
@@ -536,12 +499,7 @@ impl AppState {
         &self,
         half: Option<AbyssHalf>,
     ) -> Result<bool, PresentationError> {
-        let (mut abyss, recovered) = self.0.presentation.lock_abyss();
-        if recovered {
-            drop(abyss);
-            self.0.presentation.publish_technical_and_main();
-            return Err(PresentationError::StateUnavailable);
-        }
+        let mut abyss = self.0.presentation.lock_abyss();
         if abyss.selected == half {
             return Ok(false);
         }
@@ -697,12 +655,7 @@ impl AppState {
         if expected == candidate {
             return;
         }
-        let (mut abyss, recovered) = self.0.presentation.lock_abyss();
-        if recovered {
-            drop(abyss);
-            self.0.presentation.publish_technical_and_main();
-            return;
-        }
+        let mut abyss = self.0.presentation.lock_abyss();
         // An explicit user selection wins over a stale projection. The next
         // capture revision will compute another follow-live candidate.
         if *abyss == expected {
@@ -738,8 +691,8 @@ impl AppState {
             subtract_time_stop,
             language: config.language.code(),
         };
-        let (cache, recovered) = self.0.presentation.lock_timeline_cache();
-        if !recovered && let Some(cached) = cache.iter().find(|cached| cached.key == key) {
+        let cache = self.0.presentation.lock_timeline_cache();
+        if let Some(cached) = cache.iter().find(|cached| cached.key == key) {
             return Ok(Arc::clone(&cached.projection));
         }
         drop(cache);
@@ -761,7 +714,10 @@ impl AppState {
             )
         })?);
 
-        let (mut cache, _) = self.0.presentation.lock_timeline_cache();
+        if self.main_dps_stream_revision()? != revision {
+            return Ok(projection);
+        }
+        let mut cache = self.0.presentation.lock_timeline_cache();
         if let Some(cached) = cache.iter().find(|cached| cached.key == key) {
             return Ok(Arc::clone(&cached.projection));
         }
@@ -892,20 +848,21 @@ impl AppState {
     }
 
     pub(super) fn return_main_presentation_to_live(&self) {
+        self.reserve_main_round_selection();
         let outgoing_revision = self.0.live_capture.outgoing_hit_revision();
-        let (mut mode, recovered_mode) = self.0.presentation.lock_mode();
+        let mut mode = self.0.presentation.lock_mode();
         let mode_changed = mode.paused.is_some() || mode.selected_round.is_some();
         mode.paused = None;
         mode.selected_round = None;
         mode.selected_outgoing_revision = outgoing_revision;
         drop(mode);
 
-        let (mut abyss, recovered_abyss) = self.0.presentation.lock_abyss();
+        let mut abyss = self.0.presentation.lock_abyss();
         let abyss_changed = *abyss != AbyssPresentationState::default();
         *abyss = AbyssPresentationState::default();
         drop(abyss);
 
-        if recovered_mode || recovered_abyss || mode_changed || abyss_changed {
+        if mode_changed || abyss_changed {
             self.0.presentation.publish_technical_and_main();
         }
     }

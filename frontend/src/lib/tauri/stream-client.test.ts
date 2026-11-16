@@ -77,7 +77,7 @@ describe("stream client", () => {
     expect(unsubscribes()).toHaveLength(1);
   });
 
-  it("buffers the first delivery until the receipt arrives", async () => {
+  it("buffers multiple early deliveries in FIFO order until the receipt arrives", async () => {
     let resolveReceipt: ((value: unknown) => void) | undefined;
     respond({
       subscribe_technical_state: () =>
@@ -85,12 +85,16 @@ describe("stream client", () => {
     });
     const { onEvent } = subscribe();
 
-    tauri.send?.("early");
+    tauri.send?.("early-1");
+    tauri.send?.("early-2");
     expect(onEvent).not.toHaveBeenCalled();
     resolveReceipt?.(receipt);
     await flush();
-    expect(onEvent).toHaveBeenCalledWith("early");
-    expect(acknowledgements()).toHaveLength(1);
+    expect(onEvent.mock.calls).toEqual([["early-1"], ["early-2"]]);
+    expect(acknowledgements().map(([, args]) => args)).toEqual([
+      expect.objectContaining({ streamGeneration: "1", deliverySequence: "1" }),
+      expect.objectContaining({ streamGeneration: "1", deliverySequence: "2" }),
+    ]);
   });
 
   it("fails closed and unsubscribes when acknowledgement fails", async () => {

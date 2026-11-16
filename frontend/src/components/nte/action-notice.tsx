@@ -1,4 +1,5 @@
 import { Check, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
 import { t } from "@/lib/i18n";
@@ -12,6 +13,10 @@ interface ActionNoticeProps {
   onAction?: () => void;
   onDismiss?: () => void;
   compact?: boolean;
+}
+
+interface FloatingActionNoticeProps extends ActionNoticeProps {
+  topOffsetClass?: string;
 }
 
 export function ActionNotice({
@@ -59,7 +64,9 @@ export function ActionNotice({
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium">{message}</span>
         {detail === undefined ? null : (
-          <span className="block truncate text-muted-foreground">{detail}</span>
+          <span className="block break-words text-muted-foreground">
+            {detail}
+          </span>
         )}
       </span>
       {actionLabel !== undefined && onAction !== undefined ? (
@@ -70,7 +77,7 @@ export function ActionNotice({
       {onDismiss === undefined ? null : (
         <button
           type="button"
-          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           aria-label={t("Close")}
           onClick={onDismiss}
         >
@@ -78,5 +85,27 @@ export function ActionNotice({
         </button>
       )}
     </section>
+  );
+}
+
+export function FloatingActionNotice({
+  topOffsetClass = "top-4",
+  ...props
+}: FloatingActionNoticeProps) {
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div
+      role="region"
+      aria-label={t("Notifications")}
+      className={cn(
+        "pointer-events-none fixed inset-x-0 z-[100] flex justify-center px-4",
+        topOffsetClass,
+      )}
+    >
+      <div className="pointer-events-auto w-full max-w-lg">
+        <ActionNotice {...props} />
+      </div>
+    </div>,
+    document.body,
   );
 }

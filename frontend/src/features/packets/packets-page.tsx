@@ -1,19 +1,17 @@
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import {
   PageHeader,
   PageTitle,
   PageDescription,
 } from "@/components/nte/page-layout";
 import {
-  Activity,
   ChevronRight,
   Radio,
   RefreshCw,
   Search,
   TriangleAlert,
-  X,
 } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 
 import {
   Alert,
@@ -210,7 +208,7 @@ function PacketRow({ packet }: { packet: PacketSnapshot }) {
   const ids = packet.declaredIds.join(", ");
   return (
     <details
-      className="group px-3 py-1.5 open:bg-muted/20 min-[640px]:px-5"
+      className="packet-row group px-3 py-1.5 open:bg-muted/20 min-[640px]:px-5"
       style={{ contentVisibility: "auto", containIntrinsicSize: "64px" }}
     >
       <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/45 max-[760px]:flex-wrap [&::-webkit-details-marker]:hidden">
@@ -269,7 +267,10 @@ function DirectionBadge({ direction }: { direction: string }) {
         ? t("Incoming")
         : direction;
   return (
-    <Badge variant="outline" className="w-[58px] shrink-0 justify-center">
+    <Badge
+      variant="outline"
+      className="min-w-[4.75rem] shrink-0 justify-center px-2"
+    >
       {label}
     </Badge>
   );
@@ -348,27 +349,12 @@ function PacketsStreamError({
   error: CommandError;
   onDismiss: () => void;
 }) {
-  return createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-14 z-[90] flex justify-center px-4">
-      <Alert
-        variant="destructive"
-        className="pointer-events-auto w-full max-w-xl shadow-xl"
-      >
-        <Activity className="size-4" aria-hidden="true" />
-        <AlertTitle>{t("Packet stream was interrupted")}</AlertTitle>
-        <AlertDescription>{t(error.messageKey)}</AlertDescription>
-        <AlertAction>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            aria-label={t("Dismiss")}
-            onClick={onDismiss}
-          >
-            <X aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
-    </div>,
-    document.body,
+  return (
+    <FloatingActionNotice
+      status="error"
+      message={t("Packet stream was interrupted")}
+      detail={t(error.messageKey)}
+      onDismiss={onDismiss}
+    />
   );
 }

@@ -4,7 +4,8 @@ use tauri::{AppHandle, State, WebviewWindow, ipc::Channel};
 
 use crate::{
     channels::stream_runtime::{
-        PollingStreamOutput, StreamDeliveryEndpoint, spawn_polling_stream, validate_subscription_id,
+        PollingStreamOutput, subscribe_blocking_polling_stream, unsubscribe_stream,
+        validate_subscription_id,
     },
     commands::main_dps::snapshot,
     contract::{CommandError, SubscriptionReceipt, main_dps::MainDpsEvent, stream::StreamKind},
@@ -24,26 +25,22 @@ pub(crate) fn subscribe_main_dps(
     validate_subscription_id(&subscription_id)?;
     main_dps::validate_window(&window)?;
     state.main_dps_stream_revision()?;
-    let stream_kind = StreamKind::MainDps;
-    let stream_key = stream_kind.stream_key(&subscription_id);
-    let state = state.inner().clone();
-    let registration = state.reserve_stream(window.label(), &stream_key)?;
-    let stream_generation = registration.generation();
     let mut last_revision = None;
     let mut last_game_detected = None;
     let mut last_game_detection_status = None;
     let mut last_empty = true;
     let mut empty_probe_ticks = 0_u8;
     let mut last_capture_lifecycle = None;
-    let action_state = state.clone();
+    let action_state = state.inner().clone();
     let action_app = app.clone();
-    spawn_polling_stream(
-        "nte-main-dps-stream",
-        StreamDeliveryEndpoint::new(on_event),
-        state,
-        registration,
+    subscribe_blocking_polling_stream(
+        subscription_id,
+        StreamKind::MainDps,
         MAIN_DPS_STREAM_INTERVAL_MS,
-        move |state| {
+        on_event,
+        state.inner(),
+        &window,
+        move |state, _stop| {
             let Ok(revision) = state.main_dps_stream_revision() else {
                 return PollingStreamOutput::Stop;
             };
@@ -85,13 +82,7 @@ pub(crate) fn subscribe_main_dps(
                 PollingStreamOutput::NoChange
             }
         },
-    )?;
-    Ok(SubscriptionReceipt::new(
-        subscription_id,
-        stream_kind,
-        stream_generation,
-        MAIN_DPS_STREAM_INTERVAL_MS,
-    ))
+    )
 }
 
 fn publish_capture_transition(
@@ -142,13 +133,13 @@ pub(crate) fn unsubscribe_main_dps(
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<(), CommandError> {
-    validate_subscription_id(&subscription_id)?;
-    main_dps::validate_window(&window)?;
-    state.stop_stream(
-        window.label(),
-        &StreamKind::MainDps.stream_key(&subscription_id),
-    )?;
-    Ok(())
+    unsubscribe_stream(
+        &subscription_id,
+        StreamKind::MainDps,
+        state.inner(),
+        &window,
+        main_dps::validate_window,
+    )
 }
 
 #[cfg(test)]

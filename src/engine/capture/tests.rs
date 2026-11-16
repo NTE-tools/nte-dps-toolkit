@@ -106,7 +106,7 @@ impl PacketDecoder {
         characters: &HashMap<u32, CharacterInfo>,
         sender: &EngineEventSink,
     ) {
-        self.process_capture_frame(
+        let _ = self.process_capture_frame(
             CapturedPacket {
                 link_type: CaptureLinkType::Ethernet,
                 data: packet,
@@ -3292,6 +3292,61 @@ fn disabled_raw_capture_has_no_path_or_writer() {
 }
 
 #[test]
+fn async_raw_capture_writes_and_copies_outside_capture_thread() {
+    let directory = std::env::temp_dir().join(format!(
+        "nte-async-raw-capture-{}-{}",
+        std::process::id(),
+        current_filetime_100ns()
+    ));
+    std::fs::create_dir_all(&directory).expect("create test directory");
+    let copied = directory.join("exported.pcapng");
+    let device = CaptureDevice {
+        name: r"\Device\NPF_{TEST}".to_owned(),
+        description: "Test NIC".to_owned(),
+        ipv4: vec![Ipv4Addr::new(10, 0, 0, 2)],
+    };
+    let ethernet = udp_ipv4_packet(
+        b"async-raw-packet",
+        Ipv4Addr::new(10, 0, 0, 2),
+        50_000,
+        Ipv4Addr::new(10, 0, 0, 3),
+        7_777,
+    );
+    let buffer = RawCaptureBuffer::new(Some(&directory));
+    buffer.initialize(&device, CaptureLinkType::Ethernet);
+    buffer.push(Duration::from_secs(1), ethernet.len() as u32, &ethernet);
+    buffer.finish();
+
+    let snapshot = buffer.snapshot();
+    assert!(!snapshot.writing);
+    assert!(!snapshot.write_error);
+    assert_eq!(snapshot.packet_count, 1);
+    assert_eq!(snapshot.captured_bytes, ethernet.len() as u64);
+
+    let (count, bytes) = buffer.save(&copied).expect("finished capture should copy");
+    assert_eq!(count, 1);
+    assert_eq!(bytes, ethernet.len() as u64);
+    assert!(copied.is_file());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn disconnected_event_sink_stops_decoder_emission_immediately() {
+    let mut decoder = PacketDecoder::default();
+    let characters = HashMap::new();
+    let (sender, receiver) = bounded(1);
+    drop(receiver);
+    let sink = EngineEventSink::reliable(sender);
+    let hit = targetless_hit();
+    assert!(
+        decoder
+            .emit_hits(std::iter::once(hit), &characters, &sink)
+            .is_err()
+    );
+    assert!(decoder.enable_exact_mode(&sink).is_err());
+}
+
+#[test]
 fn reaction_2_gameplay_effect_is_not_authoritative_fuwen_damage() {
     const REACTION_2_DAMAGE_EFFECT: &str = "GE_ActorReaction_2_new_Damage";
     let names = HashMap::from([(555, REACTION_2_DAMAGE_EFFECT.to_owned())]);
@@ -5823,16 +5878,22 @@ fn emission_drops_outgoing_death_settlement_marker() {
     marker.target_max_hp = 100.0;
     set_wire_target(&mut marker, [6_u8; 29]);
 
-    decoder.emit_hits(std::iter::once(marker.clone()), &characters, &sink);
+    decoder
+        .emit_hits(std::iter::once(marker.clone()), &characters, &sink)
+        .unwrap();
     assert!(receiver.try_recv().is_err());
 
     marker.target_id = None;
     marker.target_context.clear();
-    decoder.emit_hits(std::iter::once(marker.clone()), &characters, &sink);
+    decoder
+        .emit_hits(std::iter::once(marker.clone()), &characters, &sink)
+        .unwrap();
     assert!(receiver.try_recv().is_err());
 
     marker.direction = HitDirection::Incoming;
-    decoder.emit_hits(std::iter::once(marker), &characters, &sink);
+    decoder
+        .emit_hits(std::iter::once(marker), &characters, &sink)
+        .unwrap();
     assert!(matches!(receiver.try_recv(), Ok(EngineEvent::Hit(_))));
 }
 
@@ -7056,11 +7117,13 @@ fn disabled_calibration_observes_hits_but_exposes_only_the_unassigned_residual()
     hit.target_max_hp = 10_000.0;
     set_wire_target(&mut hit, [7; 29]);
     let (sender, _receiver) = bounded(4);
-    decoder.emit_hits(
-        std::iter::once(hit),
-        &characters,
-        &EngineEventSink::reliable(sender),
-    );
+    decoder
+        .emit_hits(
+            std::iter::once(hit),
+            &characters,
+            &EngineEventSink::reliable(sender),
+        )
+        .unwrap();
 
     let update = boss_hp_update(8_750.0);
     let (inferred_follow_ups, corrections, unattributed) =
@@ -7105,11 +7168,13 @@ fn server_authoritative_semantic_forces_legacy_hp_correction_when_calibration_is
     hit.gameplay_effect_name = Some("GE_Player_Lacrimosa_Blood_Damage_LV6".to_owned());
     set_wire_target(&mut hit, [7; 29]);
     let (sender, _receiver) = bounded(4);
-    decoder.emit_hits(
-        std::iter::once(hit),
-        &characters,
-        &EngineEventSink::reliable(sender),
-    );
+    decoder
+        .emit_hits(
+            std::iter::once(hit),
+            &characters,
+            &EngineEventSink::reliable(sender),
+        )
+        .unwrap();
 
     let update = boss_hp_update(8_750.0);
     let (_, corrections, unattributed) =
@@ -7181,11 +7246,13 @@ fn disabled_calibration_keeps_lethal_residual_unattributed() {
     set_wire_target(&mut source, [7; 29]);
     let prepared = decoder.prepare_hits_for_emission(vec![source], &[1051], false, &characters);
     let (sender, _receiver) = bounded(4);
-    decoder.emit_hits(
-        prepared.emit,
-        &characters,
-        &EngineEventSink::reliable(sender),
-    );
+    decoder
+        .emit_hits(
+            prepared.emit,
+            &characters,
+            &EngineEventSink::reliable(sender),
+        )
+        .unwrap();
 
     let lethal = boss_hp_update(1.0);
     let (inferred_follow_ups, corrections, unattributed) =

@@ -35,7 +35,6 @@ use nte_dps_tool::{
         },
         packets::PacketStreamRevision,
         skills::{SkillsProjectionOptions, project_skills},
-        sync::lock_or_repair,
         timeline::{TimelineProjection, TimelineScope},
         update::{AvailableComponentUpdate, UpdateComponent},
     },
@@ -84,14 +83,16 @@ use crate::{
     encrypted_ini_service::{
         EncryptedIniProjection, EncryptedIniService, EncryptedIniServiceError,
     },
-    equipment_operation_service::{EquipmentOperationError, EquipmentOperationService},
     settings_service::{SettingsService, SettingsServiceError},
     team_import_service::{TeamImportError, TeamImportService},
-    update_runtime::UpdateRuntimeService,
     windows::hud::HUD_WINDOW_LABEL,
 };
+use nte_dps_tool::core::{
+    equipment_runtime::{EquipmentOperationError, EquipmentOperationService},
+    update_runtime::UpdateRuntimeService,
+};
 
-pub(crate) use crate::update_runtime::UpdateActionError;
+pub(crate) use nte_dps_tool::core::update_runtime::UpdateActionError;
 
 #[derive(Clone, Debug)]
 pub(crate) enum EmptyCurtainRuntimeError {
@@ -582,17 +583,9 @@ impl StreamRegistry {
     fn lock_entries(
         &self,
     ) -> Result<MutexGuard<'_, HashMap<StreamIdentity, StreamSlot>>, StreamRegistryError> {
-        let mut removed = HashMap::new();
-        let (entries, recovered) =
-            lock_or_repair(&self.entries, |entries| removed = std::mem::take(entries));
-        if !recovered {
-            return Ok(entries);
-        }
-        drop(entries);
-        for slot in removed.into_values() {
-            cancel_stream_slot(slot);
-        }
-        Err(StreamRegistryError::RuntimeUnavailable)
+        self.entries
+            .lock()
+            .map_err(|_| StreamRegistryError::RuntimeUnavailable)
     }
 }
 
@@ -671,9 +664,7 @@ impl IslandNoticeRuntime {
         message_arguments: Vec<String>,
         undo_token: Option<String>,
     ) -> String {
-        // Ephemeral notification state is safe to reset after an interrupted
-        // mutation. The replacement is the sole externally visible change.
-        let (mut notice, _) = self.lock_discarding_poison();
+        let mut notice = self.notice.lock().expect("island notice lock");
         if let Some(current) = notice.as_ref()
             && Instant::now() < current.expires_at
             && current.tone == tone
@@ -697,39 +688,25 @@ impl IslandNoticeRuntime {
     }
 
     fn current(&self) -> Option<IslandNoticeState> {
-        let (mut notice, discarded_notice) = self.lock_discarding_poison();
+        let mut notice = self.notice.lock().expect("island notice lock");
         let expired = notice
             .as_ref()
             .is_some_and(|notice| Instant::now() > notice.expires_at);
         if expired {
             notice.take();
-        }
-        if discarded_notice || expired {
             self.bump_revision();
         }
         notice.clone()
     }
 
     fn dismiss(&self, id: &str) -> bool {
-        let (mut notice, discarded_notice) = self.lock_discarding_poison();
-        if discarded_notice {
-            self.bump_revision();
-            return true;
-        }
+        let mut notice = self.notice.lock().expect("island notice lock");
         if notice.as_ref().is_some_and(|notice| notice.id == id) {
             notice.take();
             self.bump_revision();
             return true;
         }
         false
-    }
-
-    fn lock_discarding_poison(&self) -> (MutexGuard<'_, Option<IslandNoticeState>>, bool) {
-        let mut discarded_notice = false;
-        let (notice, _) = lock_or_repair(&self.notice, |notice| {
-            discarded_notice = notice.take().is_some();
-        });
-        (notice, discarded_notice)
     }
 
     fn bump_revision(&self) -> u64 {
@@ -911,57 +888,33 @@ struct PresentationState {
     timeline_cache: Mutex<Vec<TimelineProjectionCache>>,
 }
 
-/// Presentation state and caches are rebuildable projections, so poison
-/// resets them to their default.
-fn lock_or_reset<'a, T: Default>(mutex: &'a Mutex<T>, warning: &str) -> (MutexGuard<'a, T>, bool) {
-    let (guard, recovered) = lock_or_repair(mutex, |value| *value = T::default());
-    if recovered {
-        log::warn!("{warning}");
-    }
-    (guard, recovered)
-}
-
 impl PresentationState {
-    fn lock_mode(&self) -> (MutexGuard<'_, PresentationModeState>, bool) {
-        lock_or_reset(
-            &self.mode,
-            "Presentation mode was reset after an interrupted update",
-        )
+    fn lock_mode(&self) -> MutexGuard<'_, PresentationModeState> {
+        self.mode.lock().expect("presentation mode lock")
     }
 
-    fn lock_abyss(&self) -> (MutexGuard<'_, AbyssPresentationState>, bool) {
-        lock_or_reset(
-            &self.abyss,
-            "Presentation abyss selection was reset after an interrupted update",
-        )
+    fn lock_abyss(&self) -> MutexGuard<'_, AbyssPresentationState> {
+        self.abyss.lock().expect("presentation abyss lock")
     }
 
-    fn lock_details(&self) -> (MutexGuard<'_, MainDpsDetailsState>, bool) {
-        lock_or_reset(
-            &self.details,
-            "Presentation detail requests were reset after an interrupted update",
-        )
+    fn lock_details(&self) -> MutexGuard<'_, MainDpsDetailsState> {
+        self.details.lock().expect("presentation details lock")
     }
 
-    fn lock_cache(&self) -> (MutexGuard<'_, Vec<MainDpsDetailCache>>, bool) {
-        lock_or_reset(
-            &self.cache,
-            "Presentation detail cache was discarded after an interrupted update",
-        )
+    fn lock_cache(&self) -> MutexGuard<'_, Vec<MainDpsDetailCache>> {
+        self.cache.lock().expect("presentation detail cache lock")
     }
 
-    fn lock_timeline_cache(&self) -> (MutexGuard<'_, Vec<TimelineProjectionCache>>, bool) {
-        lock_or_reset(
-            &self.timeline_cache,
-            "Timeline projection cache was discarded after an interrupted update",
-        )
+    fn lock_timeline_cache(&self) -> MutexGuard<'_, Vec<TimelineProjectionCache>> {
+        self.timeline_cache
+            .lock()
+            .expect("timeline projection cache lock")
     }
 
-    fn lock_main_readout_cache(&self) -> (MutexGuard<'_, Vec<MainReadoutCache>>, bool) {
-        lock_or_reset(
-            &self.main_readout_cache,
-            "Main readout cache was discarded after an interrupted update",
-        )
+    fn lock_main_readout_cache(&self) -> MutexGuard<'_, Vec<MainReadoutCache>> {
+        self.main_readout_cache
+            .lock()
+            .expect("main readout cache lock")
     }
 
     fn publish_technical_and_main(&self) {

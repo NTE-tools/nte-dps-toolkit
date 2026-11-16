@@ -1,5 +1,7 @@
-use crate::equipment_operation_service::{EmptyCurtainOperationState, EquipmentOperationSnapshot};
-use nte_dps_tool::core::snapshot::{InventorySnapshot, inventory_snapshot};
+use nte_dps_tool::core::{
+    equipment_runtime::{EmptyCurtainOperationState, EquipmentOperationSnapshot},
+    snapshot::{InventorySnapshot, inventory_snapshot},
+};
 
 use super::*;
 

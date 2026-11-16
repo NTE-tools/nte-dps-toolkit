@@ -37,7 +37,7 @@ export function OnboardingOverlay({
     <Dialog open>
       <DialogPortal>
         <DialogBackdrop className="z-[80]" />
-        <DialogPopup className="top-1/2 left-1/2 z-[81] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+        <DialogPopup className="top-1/2 left-1/2 z-[81] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-xl">
           <div
             className="mb-5 flex gap-2"
             aria-label={t("Onboarding progress")}

@@ -11,9 +11,9 @@ const BYTE_UNITS = [
 ] as const;
 
 export function updateComponentLabelKey(
-  component: UpdateComponent,
-): "Application" | "Mod loader" {
-  return component === "app" ? "Application" : "Mod loader";
+  _component: UpdateComponent,
+): "Application" {
+  return "Application";
 }
 
 export function updateProgressPercent(

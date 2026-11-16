@@ -2,22 +2,18 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import placeholderConformance from "@res/languages/placeholder-conformance.json";
 
-import { formatTemplate, setFrontendLanguage, t } from "./i18n";
+import {
+  formatTemplate,
+  getFrontendLanguage,
+  setFrontendLanguage,
+  t,
+} from "./i18n";
 
-const MIGRATION_PARITY_KEYS = [
-  "Boss",
-  "Failed to import team data.",
-  "Team data file dialog failed.",
-  "Toggle mouse passthrough while the combat HUD is active",
-  "DPS: {}",
-  "Share: {}%",
-  "Taken: {}",
-  "Follow-up",
-] as const;
+afterEach(async () => {
+  await setFrontendLanguage("zh-CN");
+});
 
-afterEach(() => setFrontendLanguage("zh-CN"));
-
-describe("frontend i18n parity", () => {
+describe("frontend i18n", () => {
   it.each(placeholderConformance)(
     "formats the shared placeholder grammar: $template",
     ({ template, arguments: arguments_, expected }) => {
@@ -25,13 +21,18 @@ describe("frontend i18n parity", () => {
     },
   );
 
-  it.each(["zh-CN", "ja"] as const)(
-    "localizes the remaining migrated UI keys in %s",
-    (language) => {
-      setFrontendLanguage(language);
-      for (const key of MIGRATION_PARITY_KEYS) {
-        expect(t(key)).not.toBe(key);
-      }
-    },
-  );
+  it("switches synchronously between zh-CN and en and lazy-loads ja", async () => {
+    await setFrontendLanguage("en");
+    expect(getFrontendLanguage()).toBe("en");
+    expect(t("Settings")).toBe("Settings");
+
+    await setFrontendLanguage("zh-CN");
+    expect(getFrontendLanguage()).toBe("zh-CN");
+    expect(t("Settings")).toBe("设置");
+
+    await setFrontendLanguage("ja");
+    expect(getFrontendLanguage()).toBe("ja");
+    expect(t("Settings")).not.toBe("Settings");
+    expect(t("Unmapped fallback key")).toBe("Unmapped fallback key");
+  });
 });

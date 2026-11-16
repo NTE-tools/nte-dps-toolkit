@@ -11,24 +11,19 @@ pub mod combat_details;
 pub mod diagnostics;
 pub mod empty_curtain;
 pub mod encrypted_ini;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "cli"))]
 pub mod equipment_rpc;
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "cli"))]
 pub mod equipment_runtime;
 pub mod history;
 pub mod hud;
 pub mod live_capture;
 #[cfg(feature = "desktop")]
 pub mod mod_market;
-#[cfg(feature = "desktop")]
-pub mod mod_sdk;
-#[cfg(feature = "desktop")]
-pub mod mod_studio;
 pub mod packets;
 pub mod reducer;
 pub mod skills;
 pub mod snapshot;
-pub mod sync;
 #[cfg(feature = "desktop")]
 pub mod team_data;
 pub mod timeline;
@@ -36,6 +31,8 @@ pub mod timeline;
 pub mod toolkit;
 #[cfg(feature = "desktop")]
 pub mod update;
+#[cfg(feature = "desktop")]
+pub mod update_runtime;
 pub mod user_characters;
 pub mod user_equipment;
 

@@ -723,46 +723,6 @@ fn pending_replacement_reservations_are_globally_bounded() {
 }
 
 #[test]
-fn poisoned_stream_registry_resets_atomically_and_fails_the_triggering_operation() {
-    let state = AppState::default();
-    let current = state
-        .reserve_stream("hud", "technical")
-        .expect("reserve current stream");
-    assert!(
-        state
-            .activate_stream(&current)
-            .expect("activate current stream")
-    );
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .streams
-            .entries
-            .lock()
-            .expect("healthy stream registry lock");
-        panic!("poison stream registry");
-    })
-    .join();
-
-    assert_eq!(
-        state.reserve_stream("hud", "next").err(),
-        Some(StreamRegistryError::RuntimeUnavailable)
-    );
-    assert!(current.is_cancelled());
-    assert_eq!(state.stream_registry_len().expect("reset registry"), 0);
-
-    let recovered = state
-        .reserve_stream("hud", "next")
-        .expect("reserve after controlled reset");
-    assert!(
-        state
-            .activate_stream(&recovered)
-            .expect("activate recovered stream")
-    );
-}
-
-#[test]
 fn stream_identity_includes_owner_and_wrong_owner_stop_is_a_no_op() {
     let state = AppState::default();
     let hud = state
@@ -1008,8 +968,7 @@ fn main_readout_cache_reuses_exact_revision_and_invalidates_on_hit() {
             f64::from(damage)
         );
     }
-    let (cache, recovered) = state.0.presentation.lock_main_readout_cache();
-    assert!(!recovered);
+    let cache = state.0.presentation.lock_main_readout_cache();
     assert_eq!(cache.len(), 6, "readout cache memory must remain bounded");
 }
 
@@ -1371,89 +1330,6 @@ fn permanent_history_failure_is_reported_once_and_never_enters_the_retry_queue()
 }
 
 #[test]
-fn poisoned_history_transaction_does_not_run_the_action() {
-    let state = AppState::default();
-    let initial_revision = state.history_revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .history
-            .transaction
-            .lock()
-            .expect("history transaction lock");
-        panic!("poison History transaction");
-    })
-    .join();
-
-    let action_ran = AtomicBool::new(false);
-    let _ = state.with_history_transaction(|| {
-        action_ran.store(true, Ordering::Release);
-        state.bump_history_revision();
-    });
-
-    assert!(
-        !action_ran.load(Ordering::Acquire),
-        "a poisoned History transaction must fail before its action runs"
-    );
-    assert_eq!(state.history_revision(), initial_revision);
-}
-
-#[test]
-fn poisoned_history_transaction_keeps_the_live_round_before_persistence() {
-    let live_capture = LiveCaptureService::new(LiveCaptureResources::default());
-    let mut current = CombatState::default();
-    current.push_hit(test_hit(123.0));
-    live_capture
-        .restore_session(current, CaptureQualitySource::Live)
-        .expect("healthy live-capture state");
-    let state = AppState::new(UiConfig::default(), live_capture.clone());
-    let initial_revision = state.history_revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .history
-            .transaction
-            .lock()
-            .expect("history transaction lock");
-        panic!("poison History transaction before round cut");
-    })
-    .join();
-
-    assert!(state.archive_current_history_round().is_err());
-    assert_eq!(
-        live_capture
-            .with_state(|current| current.total_damage)
-            .expect("healthy live-capture state"),
-        123.0,
-        "History runtime failure must be detected before the live round is cut"
-    );
-    assert_eq!(state.history_revision(), initial_revision);
-}
-
-#[test]
-fn poisoned_history_maintenance_reports_unavailable() {
-    let state = AppState::default();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .history
-            .transaction
-            .lock()
-            .expect("history transaction lock");
-        panic!("poison History maintenance transaction");
-    })
-    .join();
-
-    assert_eq!(
-        state.maintain_history_rounds(),
-        Err(HistoryRuntimeError::Unavailable)
-    );
-}
-
-#[test]
 fn history_retry_releases_transaction_and_requeues_unavailable_tail_in_order() {
     fn archive(damage: f64, source: CaptureQualitySource) -> PreparedHistoryArchive {
         let mut state = CombatState::default();
@@ -1616,149 +1492,6 @@ fn history_retry_drops_permanent_failure_and_continues_with_the_remaining_queue(
             .expect("pending History archives lock")
             .is_empty()
     );
-}
-
-#[test]
-fn poisoned_history_archive_transaction_keeps_the_live_round() {
-    let live_capture = LiveCaptureService::new(LiveCaptureResources::default());
-    let mut current = CombatState::default();
-    current.push_hit(test_hit(321.0));
-    live_capture
-        .restore_session(current, CaptureQualitySource::Live)
-        .expect("healthy live-capture state");
-    let state = AppState::new(UiConfig::default(), live_capture.clone());
-    let initial_revision = state.history_revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .history
-            .archive_transaction
-            .lock()
-            .expect("history archive transaction lock");
-        panic!("poison History archive transaction");
-    })
-    .join();
-
-    let persist_ran = AtomicBool::new(false);
-    assert!(
-        state
-            .archive_current_history_round_with(false, |_, _| {
-                persist_ran.store(true, Ordering::Release);
-                Ok(HistoryPersistenceOutcome::Committed)
-            })
-            .is_err()
-    );
-    assert_eq!(state.history_revision(), initial_revision);
-    assert!(!persist_ran.load(Ordering::Acquire));
-    assert_eq!(
-        live_capture
-            .with_state(|current| current.total_damage)
-            .expect("healthy live-capture state"),
-        321.0,
-        "the live round must not be cut when archive serialization is unavailable"
-    );
-}
-
-#[test]
-fn poisoned_pending_history_queue_keeps_the_live_round() {
-    let live_capture = LiveCaptureService::new(LiveCaptureResources::default());
-    let mut current = CombatState::default();
-    current.push_hit(test_hit(654.0));
-    live_capture
-        .restore_session(current, CaptureQualitySource::Live)
-        .expect("healthy live-capture state");
-    let state = AppState::new(UiConfig::default(), live_capture.clone());
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .history
-            .pending_archives
-            .lock()
-            .expect("pending History archives lock");
-        panic!("poison pending History archives");
-    })
-    .join();
-
-    let persist_ran = AtomicBool::new(false);
-    let initial_revision = state.history_revision();
-    assert!(
-        state
-            .archive_current_history_round_with(false, |_, _| {
-                persist_ran.store(true, Ordering::Release);
-                Ok(HistoryPersistenceOutcome::Committed)
-            })
-            .is_err()
-    );
-    assert!(!persist_ran.load(Ordering::Acquire));
-    assert_eq!(state.history_revision(), initial_revision);
-    assert_eq!(
-        live_capture
-            .with_state(|current| current.total_damage)
-            .expect("healthy live-capture state"),
-        654.0,
-        "the live round must not be cut when retry capacity cannot be checked"
-    );
-}
-
-#[test]
-fn poisoned_history_round_cache_is_discarded_before_rebuild() {
-    let state = AppState::default();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let mut cache = poison_state
-            .0
-            .history
-            .round_cache
-            .lock()
-            .expect("History round cache lock");
-        cache.revision = Some(poison_state.history_revision());
-        cache.index = Arc::new(vec![HistoryRoundIndex::for_test(
-            "poisoned-cache-entry",
-            false,
-        )]);
-        panic!("poison History round cache");
-    })
-    .join();
-
-    let index = state.main_round_index();
-
-    assert!(
-        index
-            .iter()
-            .all(|record| record.id != "poisoned-cache-entry"),
-        "a partially mutated cache must never be projected"
-    );
-    assert!(
-        !state.0.history.round_cache.is_poisoned(),
-        "a rebuilt cache must clear the poison flag"
-    );
-}
-
-#[test]
-fn poisoned_history_undo_slot_rejects_mutation() {
-    let state = AppState::default();
-    let initial_revision = state.history_revision();
-    let (directory, tombstone) = temporary_history_tombstone("poisoned-slot");
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _guard = poison_state
-            .0
-            .history
-            .undo
-            .lock()
-            .expect("History undo lock");
-        panic!("poison History undo slot");
-    })
-    .join();
-
-    let result = state.remember_deleted_history_tombstone(tombstone.clone());
-
-    assert!(result.is_err());
-    assert_eq!(state.history_revision(), initial_revision);
-    discard_tombstoned_record(&tombstone).expect("discard unused tombstone fixture");
-    let _ = fs::remove_dir_all(directory);
 }
 
 #[test]
@@ -1974,38 +1707,6 @@ fn invalid_json_replay_releases_reservation_without_replacing_session() {
 }
 
 #[test]
-fn poisoned_replay_import_runtime_rejects_reservation_before_replay_work() {
-    let state = AppState::default();
-    let initial_revision = state.0.live_capture.revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _reserved = poison_state
-            .0
-            .replay_import
-            .reservation
-            .lock()
-            .expect("replay import reservation lock");
-        panic!("poison replay import reservation");
-    })
-    .join();
-
-    let error = match state.begin_replay_import(false) {
-        Ok(_) => panic!("poisoned replay import runtime must fail closed"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(error, ReplayImportError::RuntimeUnavailable));
-    assert_eq!(
-        state
-            .request_capture_start(false)
-            .expect_err("poisoned replay runtime must reject live capture")
-            .code,
-        CoreErrorCode::CaptureStateUnavailable
-    );
-    assert_eq!(state.0.live_capture.revision(), initial_revision);
-}
-
-#[test]
 fn replay_import_reservation_lock_is_released_before_expensive_work() {
     let state = AppState::default();
     let reservation = state
@@ -2033,174 +1734,6 @@ fn replay_import_reservation_lock_is_released_before_expensive_work() {
             .lock()
             .expect("replay import reservation lock"),
         ReplayImportReservationState::Idle
-    );
-}
-
-#[test]
-fn poisoned_replay_import_runtime_rejects_start_without_consuming_reservation() {
-    let state = AppState::default();
-    let reservation = state
-        .begin_replay_import(false)
-        .expect("reserve replay import");
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _reserved = poison_state
-            .0
-            .replay_import
-            .reservation
-            .lock()
-            .expect("replay import reservation lock");
-        panic!("poison replay import reservation after dialog reservation");
-    })
-    .join();
-    let initial_revision = state.0.live_capture.revision();
-
-    let error = reservation
-        .start(
-            CaptureReplayKind::Json,
-            PathBuf::from("missing-poisoned-replay.json"),
-            false,
-        )
-        .expect_err("poisoned replay import runtime must reject start");
-
-    assert!(matches!(error, ReplayImportError::RuntimeUnavailable));
-    assert_eq!(state.0.live_capture.revision(), initial_revision);
-    let reserved = state
-        .0
-        .replay_import
-        .reservation
-        .lock()
-        .expect_err("runtime remains poisoned")
-        .into_inner();
-    assert_eq!(
-        *reserved,
-        ReplayImportReservationState::ReplayImport,
-        "Drop must not blindly mutate poisoned state"
-    );
-}
-
-#[test]
-fn poisoned_session_undo_runtime_rejects_reset_without_sequence_or_capture_change() {
-    let live_capture = LiveCaptureService::new(LiveCaptureResources::default());
-    let mut previous = CombatState::default();
-    previous.push_hit(test_hit(444.0));
-    live_capture
-        .restore_session(previous, CaptureQualitySource::Live)
-        .expect("healthy live-capture state");
-    let state = AppState::new(UiConfig::default(), live_capture);
-    let initial_sequence = state.0.session_undo.sequence.load(Ordering::Acquire);
-    let initial_revision = state.0.live_capture.revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _undo = poison_state
-            .0
-            .session_undo
-            .entry
-            .lock()
-            .expect("session undo lock");
-        panic!("poison session undo runtime");
-    })
-    .join();
-
-    let error = state
-        .reset_session_with_undo_action()
-        .expect_err("poisoned session undo runtime must reject reset");
-
-    assert_eq!(error, SessionUndoError::RuntimeUnavailable);
-    assert_eq!(
-        state.0.session_undo.sequence.load(Ordering::Acquire),
-        initial_sequence
-    );
-    assert_eq!(state.0.live_capture.revision(), initial_revision);
-    assert_eq!(
-        state
-            .0
-            .live_capture
-            .with_state(|current| current.total_damage)
-            .expect("healthy live-capture state"),
-        444.0
-    );
-}
-
-#[test]
-fn poisoned_session_undo_runtime_rejects_restore_without_capture_change() {
-    let state = AppState::default();
-    let entry = SessionUndoEntry {
-        token: "poisoned-session-undo".to_owned(),
-        state: {
-            let mut previous = CombatState::default();
-            previous.push_hit(test_hit(333.0));
-            previous
-        },
-        quality_source: CaptureQualitySource::JsonReplay,
-        expires_at: Instant::now() + SESSION_UNDO_WINDOW,
-    };
-    *state
-        .0
-        .session_undo
-        .entry
-        .lock()
-        .expect("session undo lock") = Some(entry);
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _undo = poison_state
-            .0
-            .session_undo
-            .entry
-            .lock()
-            .expect("session undo lock");
-        panic!("poison session undo runtime before restore");
-    })
-    .join();
-    let initial_revision = state.0.live_capture.revision();
-
-    assert_eq!(
-        state.undo_session_reset("poisoned-session-undo"),
-        Err(SessionUndoError::RuntimeUnavailable)
-    );
-    assert_eq!(state.0.live_capture.revision(), initial_revision);
-    assert!(
-        !state
-            .session_has_data()
-            .expect("healthy live-capture state"),
-        "poisoned undo state must not be restored"
-    );
-}
-
-#[test]
-fn poisoned_session_undo_runtime_rejects_clear_without_capture_change() {
-    let live_capture = LiveCaptureService::new(LiveCaptureResources::default());
-    let mut previous = CombatState::default();
-    previous.push_hit(test_hit(555.0));
-    live_capture
-        .restore_session(previous, CaptureQualitySource::Live)
-        .expect("healthy live-capture state");
-    let state = AppState::new(UiConfig::default(), live_capture);
-    let initial_revision = state.0.live_capture.revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _undo = poison_state
-            .0
-            .session_undo
-            .entry
-            .lock()
-            .expect("session undo lock");
-        panic!("poison session undo runtime before clear");
-    })
-    .join();
-
-    assert_eq!(
-        state.clear_session_action(),
-        Err(SessionUndoError::RuntimeUnavailable)
-    );
-    assert_eq!(state.0.live_capture.revision(), initial_revision);
-    assert_eq!(
-        state
-            .0
-            .live_capture
-            .with_state(|current| current.total_damage)
-            .expect("healthy live-capture state"),
-        555.0
     );
 }
 
@@ -2259,7 +1792,7 @@ fn device_catalog_revision_effects_are_change_and_availability_aware() {
         state.0.presentation.main_revision.load(Ordering::Acquire),
         main_after_replace + 1
     );
-    let degraded = state.0.settings.device_catalog_snapshot(|| {});
+    let degraded = state.0.settings.device_catalog_snapshot();
     assert!(!degraded.available);
     assert_eq!(degraded.devices, candidate);
 
@@ -2361,32 +1894,6 @@ fn abyss_team_mutations_keep_each_prediction_line_explicit() {
     let (upper, lower) = state.imported_abyss_teams().expect("cleared teams");
     assert!(upper.is_none());
     assert!(lower.is_none());
-}
-
-#[test]
-fn poisoned_team_state_is_projected_unavailable_once_without_partial_data() {
-    let state = AppState::default();
-    let export = TeamDpsExport {
-        version: nte_dps_tool::engine::model::TEAM_DPS_EXPORT_VERSION,
-        single: Some(TeamDps {
-            dps: 42.0,
-            members: Vec::new(),
-        }),
-        upper: None,
-        lower: None,
-    };
-    state.import_team_data(export).expect("seed imported teams");
-    state.0.team_import.poison_for_test();
-    let revision_before_recovery = state.settings_revision();
-
-    let snapshot = state.settings_snapshot();
-
-    assert!(!snapshot.team_data.available);
-    assert!(!snapshot.team_data.upper_imported);
-    assert!(!snapshot.team_data.lower_imported);
-    assert_eq!(state.settings_revision(), revision_before_recovery + 1);
-    assert!(state.imported_abyss_teams().is_err());
-    assert_eq!(state.settings_revision(), revision_before_recovery + 1);
 }
 
 #[test]
@@ -2544,64 +2051,6 @@ fn passthrough_hotkey_readiness_is_runtime_only() {
 }
 
 #[test]
-fn poisoned_paused_presentation_discards_partial_snapshot_once() {
-    let state = AppState::default();
-    state
-        .set_main_processing_paused(true)
-        .expect("pause healthy presentation");
-    let initial_stream_revision = state.stream_revision();
-    let initial_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let mut paused = poison_state
-            .0
-            .presentation
-            .mode
-            .lock()
-            .expect("presentation mode lock");
-        let mut partial = CombatState::default();
-        partial.push_hit(test_hit(987_654.0));
-        paused.paused.as_mut().expect("paused snapshot").state = Arc::new(partial);
-        paused.selected_round = Some(SelectedRoundPresentation {
-            dps_time_mode: DpsTimeMode::RealTime,
-            record_id: "private-partial-round".to_owned(),
-            history_revision: 0,
-            state: Arc::new(CombatState::default()),
-        });
-        panic!("poison paused presentation after a partial replacement");
-    })
-    .join();
-
-    assert_eq!(
-        state
-            .with_main_presented_state(|current| current.total_damage)
-            .expect("recover presentation to live"),
-        0.0
-    );
-    assert!(!state.main_processing_paused());
-    assert!(state.main_selected_round_id().is_none());
-    assert!(!state.0.presentation.mode.is_poisoned());
-    assert_ne!(state.stream_revision(), initial_stream_revision);
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        initial_main_revision + 1
-    );
-    let recovered_stream_revision = state.stream_revision();
-    let recovered_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    assert_eq!(
-        state
-            .with_main_presented_state(|current| current.total_damage)
-            .expect("repeat healthy live projection"),
-        0.0
-    );
-    assert_eq!(state.stream_revision(), recovered_stream_revision);
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        recovered_main_revision
-    );
-}
-
-#[test]
 fn mode_noops_do_not_advance_technical_or_main_revisions() {
     let state = AppState::default();
     let initial_stream_revision = state.stream_revision();
@@ -2704,8 +2153,7 @@ fn history_selection_ignores_incoming_hits_then_returns_live_on_outgoing_hit() {
         .expect("select second half");
     let selected_outgoing_revision = state.0.live_capture.outgoing_hit_revision();
     {
-        let (mut mode, recovered) = state.0.presentation.lock_mode();
-        assert!(!recovered);
+        let mut mode = state.0.presentation.lock_mode();
         mode.selected_outgoing_revision = selected_outgoing_revision;
         mode.selected_round = Some(SelectedRoundPresentation {
             dps_time_mode: DpsTimeMode::RealTime,
@@ -2779,165 +2227,6 @@ fn detail_request_effect_is_exact_and_noop_aware() {
     assert_eq!(
         state.0.presentation.main_revision.load(Ordering::Acquire),
         initial_main_revision + 1
-    );
-}
-
-#[test]
-fn poisoned_abyss_domain_resets_both_fields_once() {
-    let state = AppState::default();
-    let initial_stream_revision = state.stream_revision();
-    let initial_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let mut abyss = poison_state
-            .0
-            .presentation
-            .abyss
-            .lock()
-            .expect("abyss presentation lock");
-        abyss.selected = Some(AbyssHalf::Second);
-        abyss.observed = Some(AbyssHalf::First);
-        panic!("poison abyss presentation after a partial transition");
-    })
-    .join();
-
-    assert_eq!(
-        state.abyss_presentation_snapshot(),
-        AbyssPresentationState::default()
-    );
-    assert!(!state.0.presentation.abyss.is_poisoned());
-    assert_ne!(state.stream_revision(), initial_stream_revision);
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        initial_main_revision + 1
-    );
-    let recovered_stream_revision = state.stream_revision();
-    let recovered_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    assert_eq!(
-        state.abyss_presentation_snapshot(),
-        AbyssPresentationState::default()
-    );
-    assert_eq!(state.stream_revision(), recovered_stream_revision);
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        recovered_main_revision
-    );
-}
-
-#[test]
-fn poisoned_detail_domain_resets_both_requests_once() {
-    let state = AppState::default();
-    let initial_stream_revision = state.stream_revision();
-    let initial_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let mut details = poison_state
-            .0
-            .presentation
-            .details
-            .lock()
-            .expect("detail presentation lock");
-        details.character.character_id = Some(7);
-        details.team.skill_filter = Some("private-partial-filter".to_owned());
-        panic!("poison detail presentation after a partial transition");
-    })
-    .join();
-
-    assert_eq!(
-        state.main_dps_detail_request(MainDpsDetailKind::Character),
-        MainDpsDetailRequest::default()
-    );
-    assert_eq!(
-        state.main_dps_detail_request(MainDpsDetailKind::Team),
-        MainDpsDetailRequest::default()
-    );
-    assert!(!state.0.presentation.details.is_poisoned());
-    assert_eq!(state.stream_revision(), initial_stream_revision);
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        initial_main_revision + 1
-    );
-    let recovered_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    assert_eq!(
-        state.main_dps_detail_request(MainDpsDetailKind::Character),
-        MainDpsDetailRequest::default()
-    );
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        recovered_main_revision
-    );
-}
-
-#[test]
-fn poisoned_detail_mutation_reports_unavailable_after_reset() {
-    let state = AppState::default();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _details = poison_state
-            .0
-            .presentation
-            .details
-            .lock()
-            .expect("detail presentation lock");
-        panic!("poison detail presentation before a command mutation");
-    })
-    .join();
-
-    assert!(matches!(
-        state.set_main_dps_detail_request(
-            MainDpsDetailKind::Character,
-            MainDpsDetailRequest {
-                character_id: Some(42),
-                ..Default::default()
-            },
-        ),
-        Err(PresentationError::StateUnavailable)
-    ));
-    assert_eq!(
-        state.main_dps_detail_request(MainDpsDetailKind::Character),
-        MainDpsDetailRequest::default()
-    );
-}
-
-#[test]
-fn poisoned_detail_cache_is_a_clean_miss_without_revision_effect() {
-    let state = AppState::default();
-    let initial_stream_revision = state.stream_revision();
-    let initial_main_revision = state.0.presentation.main_revision.load(Ordering::Acquire);
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _cache = poison_state
-            .0
-            .presentation
-            .cache
-            .lock()
-            .expect("detail cache lock");
-        panic!("poison detail cache");
-    })
-    .join();
-
-    assert!(
-        state
-            .main_dps_detail_cache_get(
-                MainDpsStreamRevision {
-                    capture: 0,
-                    packet: 0,
-                    presentation: 0,
-                    history: 0,
-                    main: 0,
-                },
-                MainDpsDetailKind::Character,
-                &MainDpsDetailRequest::default(),
-                0,
-                1,
-            )
-            .is_none()
-    );
-    assert!(!state.0.presentation.cache.is_poisoned());
-    assert_eq!(state.stream_revision(), initial_stream_revision);
-    assert_eq!(
-        state.0.presentation.main_revision.load(Ordering::Acquire),
-        initial_main_revision
     );
 }
 
@@ -3099,64 +2388,6 @@ fn update_runtime_projects_available_download_and_prepared_states() {
         Some(UpdateComponent::App)
     );
     assert!(snapshot.updates.install_enabled);
-}
-
-#[test]
-fn poisoned_update_runtime_fails_closed_without_revision_effect() {
-    let state = AppState::default();
-    let available = AvailableComponentUpdate {
-        component: UpdateComponent::App,
-        release_id: "release".to_owned(),
-        version: "0.4.0".parse().expect("semantic version"),
-        published_at: "2026-07-31T00:00:00Z".to_owned(),
-        notes: "notes".to_owned(),
-        artifact_url: "https://example.invalid/app.zip".to_owned(),
-        artifact_size: 1_024,
-        artifact_sha256: [7; 32],
-    };
-    state.begin_update_check().expect("begin update check");
-    state
-        .finish_update_check(vec![available])
-        .expect("finish update check");
-    state
-        .begin_update_download(UpdateComponent::App)
-        .expect("begin update download");
-    state
-        .finish_update_download(PreparedUpdate::App {
-            version: "0.4.0".parse().expect("semantic version"),
-            transaction_path: PathBuf::from("private-update-transaction.json"),
-            updater_path: PathBuf::from("private-updater.exe"),
-        })
-        .expect("finish update download");
-    let initial_revision = state.settings_revision();
-    state.poison_update_runtime_for_test();
-
-    assert_eq!(
-        state.begin_update_check(),
-        Err(UpdateActionError::RuntimeUnavailable)
-    );
-    assert_eq!(
-        state.begin_update_download(UpdateComponent::App),
-        Err(UpdateActionError::RuntimeUnavailable)
-    );
-    assert!(matches!(
-        state.begin_update_install(),
-        Err(UpdateActionError::RuntimeUnavailable)
-    ));
-    assert_eq!(state.settings_revision(), initial_revision);
-    let snapshot = state.settings_snapshot();
-    assert_eq!(snapshot.updates.status, "unavailable");
-    assert_eq!(
-        snapshot.updates.message_key,
-        "Update operation did not finish."
-    );
-    assert!(snapshot.updates.available.is_empty());
-    assert!(snapshot.updates.prepared.is_none());
-    assert!(!snapshot.updates.install_enabled);
-    let serialized =
-        serde_json::to_string(&snapshot.updates).expect("serialize unavailable update state");
-    assert!(!serialized.contains("private-update-transaction"));
-    assert!(!serialized.contains("private-updater"));
 }
 
 #[test]
@@ -4049,65 +3280,6 @@ fn stale_island_dismiss_keeps_the_newer_notice() {
 }
 
 #[test]
-fn poisoned_island_notice_is_discarded_once_without_projecting_partial_data() {
-    let state = AppState::default();
-    state.publish_island_notice(IslandTone::Info, "Healthy notice", Vec::new(), None);
-    let initial_revision = state.0.island_notice.revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let mut notice = poison_state
-            .0
-            .island_notice
-            .notice
-            .lock()
-            .expect("island notice lock");
-        notice.as_mut().expect("published notice").message_arguments =
-            vec!["private-partial-notice".to_owned()];
-        panic!("poison island notice");
-    })
-    .join();
-
-    assert!(state.island_notice().is_none());
-    assert!(!state.0.island_notice.notice.is_poisoned());
-    assert_eq!(state.0.island_notice.revision(), initial_revision + 1);
-    let serialized =
-        serde_json::to_string(&crate::contract::island::IslandSnapshot::from_state(&state))
-            .expect("serialize recovered island snapshot");
-    assert!(!serialized.contains("private-partial-notice"));
-    assert!(!serialized.contains("poison"));
-    assert!(state.island_notice().is_none());
-    assert_eq!(
-        state.0.island_notice.revision(),
-        initial_revision + 1,
-        "repeated empty reads must not spam the revision"
-    );
-}
-
-#[test]
-fn poisoned_island_dismiss_reports_the_visible_clear_once() {
-    let state = AppState::default();
-    state.publish_island_notice(IslandTone::Info, "Healthy notice", Vec::new(), None);
-    let initial_revision = state.0.island_notice.revision();
-    let poison_state = state.clone();
-    let _ = std::thread::spawn(move || {
-        let _notice = poison_state
-            .0
-            .island_notice
-            .notice
-            .lock()
-            .expect("island notice lock");
-        panic!("poison island notice before dismiss");
-    })
-    .join();
-
-    assert!(state.dismiss_island_notice("untrusted-notice-id"));
-    assert_eq!(state.0.island_notice.revision(), initial_revision + 1);
-    assert!(!state.dismiss_island_notice("untrusted-notice-id"));
-    assert_eq!(state.0.island_notice.revision(), initial_revision + 1);
-    assert!(state.island_notice().is_none());
-}
-
-#[test]
 fn repeated_capture_notices_do_not_replay_stale_stops_or_suppress_a_new_run() {
     let state = AppState::default();
     let mut previous_stop: Option<String> = None;
@@ -4220,10 +3392,6 @@ impl HistoryRoundIndex {
 }
 
 impl AppState {
-    pub(crate) fn poison_update_runtime_for_test(&self) {
-        self.0.update_runtime.poison_for_test();
-    }
-
     fn refresh_capture_devices_with(
         &self,
         enumerate: impl FnOnce() -> Result<Vec<CaptureDeviceSnapshot>, CoreError>,

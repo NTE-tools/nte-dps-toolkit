@@ -112,7 +112,7 @@ Core 领域错误使用 code `-32000`、message `Core error`，并提供稳定�
 {"jsonrpc":"2.0","id":"hello-1","method":"core.hello","params":{"client_name":"NTE Drive Calc","client_version":"1.3.0","protocol_min":1,"protocol_max":1}}
 ```
 
-结果包含 `core_version`、协商后的 `protocol_version`、`data_version`、`capabilities` 和 `raw_capture_default`。三个战斗读取接口分别以 `battle_record_v1`、`battle_axis_v1`、`battle_timeline_v1` 声明能力；`equipment` 表示此 Core 构建包含本机 `nte-mods-plugin` 桥接。只有本文列出的方法可调用。
+结果包含 `core_version`、协商后的 `protocol_version`、`data_version`、`capabilities` 和 `raw_capture_default`。三个战斗读取接口分别以 `battle_record_v1`、`battle_axis_v1`、`battle_timeline_v1` 声明能力；`equipment` 表示此 Core 构建包含本机 `UETools-NTE` Toolkit 装备桥接。只有本文列出的方法可调用。
 
 ## 方法索引
 
@@ -238,10 +238,10 @@ Core 领域错误使用 code `-32000`、message `Core error`，并提供稳定�
 
 ## 装备方法
 
-装备方法通过本机命名管道 `\\.\pipe\nte-mods-plugin-v7` 调用
-`nte-mods-plugin` ABI v4 / IPC v7。Core 不负责注入或加载插件；与当前
-客户端匹配的插件必须已经由 `HTGame.exe` 加载。GUI 用户可在关闭游戏后，从
-“控制台 → 空幕”经过定时风险确认来安装或移除内嵌插件；stdio Core 本身始终
+装备方法通过本机 `UETools-NTE` Toolkit 捕获与装备桥接管道调用（protocol v1，
+`equipment.execute.v1` / `inventory.snapshot.v1`）。Core 不负责注入或加载插件；
+与当前客户端匹配的 Toolkit 插件必须已经由 `HTGame.exe` 加载。GUI 用户可在关闭游戏后，
+从“控制台 → 插件”经过定时风险确认来安装或管理插件；stdio Core 本身始终
 不会修改游戏目录。角色与装备 UID 都使用背包
 快照返回的 `{"slot":1,"serial":2}` 结构；两个分量都必须非零，且都不能为
 `4294967295`（`u32::MAX`）。驱动块行列从 1 开始，且必须同时位于 `1..5`。

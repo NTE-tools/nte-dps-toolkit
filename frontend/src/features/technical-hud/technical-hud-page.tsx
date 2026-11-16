@@ -39,6 +39,7 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { useCloseOnWindowBlur } from "@/hooks/use-close-on-window-blur";
 import { useHudModuleSortable } from "@/hooks/use-hud-module-sortable";
 import { useSettingsPresentation } from "@/lib/settings-presentation";
 import {
@@ -351,22 +352,7 @@ function HudEditorRail({
         <TooltipContent>{t("Main Window")}</TooltipContent>
       </Tooltip>
 
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              className="text-foreground/75 hover:bg-foreground/10 hover:text-foreground"
-              aria-label={t("Reset")}
-              onClick={() => void onReset()}
-            />
-          }
-        >
-          <RefreshCw data-icon="inline-start" aria-hidden="true" />
-        </TooltipTrigger>
-        <TooltipContent>{t("Reset")}</TooltipContent>
-      </Tooltip>
+      <HudResetButton onReset={onReset} />
 
       <HudToggle
         icon={<MousePointer2 aria-hidden="true" />}
@@ -381,6 +367,50 @@ function HudEditorRail({
         onPressedChange={onAlwaysOnTopChange}
       />
     </div>
+  );
+}
+
+function HudResetButton({ onReset }: { onReset: () => Promise<void> }) {
+  const [armed, setArmed] = useState(false);
+
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 3500);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+
+  return (
+    <Tooltip open={armed ? true : undefined}>
+      <TooltipTrigger
+        render={
+          <Button
+            variant={armed ? "destructive" : "ghost"}
+            size="icon-xs"
+            className={
+              armed
+                ? undefined
+                : "text-foreground/75 hover:bg-foreground/10 hover:text-foreground"
+            }
+            aria-label={t(armed ? "Confirm Reset" : "Reset")}
+            onBlur={() => setArmed(false)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setArmed(false);
+            }}
+            onClick={() => {
+              if (!armed) {
+                setArmed(true);
+                return;
+              }
+              setArmed(false);
+              void onReset();
+            }}
+          />
+        }
+      >
+        <RefreshCw data-icon="inline-start" aria-hidden="true" />
+      </TooltipTrigger>
+      <TooltipContent>{t(armed ? "Confirm Reset" : "Reset")}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -405,14 +435,7 @@ function HudModuleControls({
   const [widthPending, setWidthPending] = useState(false);
   const modules = hud.config.moduleOrder;
   const pending = pendingModule !== null || movePending || widthPending;
-  useEffect(() => {
-    if (!open) return;
-    const closeModulesOnWindowBlur = () => setOpen(false);
-    window.addEventListener("blur", closeModulesOnWindowBlur);
-    return () => {
-      window.removeEventListener("blur", closeModulesOnWindowBlur);
-    };
-  }, [open]);
+  useCloseOnWindowBlur(open, () => setOpen(false));
 
   const setVisibility = async (module: HudModule, visible: boolean) => {
     setPendingModule(module);
@@ -1085,11 +1108,6 @@ function HudCharacterRow({
       style={{ "--motion-index": index } as CSSProperties}
     >
       <div className="flex min-w-0 items-center gap-1.5">
-        <span
-          className="h-6 w-0.5 shrink-0 rounded-full"
-          style={{ backgroundColor: color }}
-          aria-hidden="true"
-        />
         <span
           className="relative grid size-6 shrink-0 place-items-center overflow-hidden rounded-md border border-foreground/30 text-xs font-semibold text-foreground"
           style={{ backgroundColor: color }}

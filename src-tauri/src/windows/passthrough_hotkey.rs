@@ -1,4 +1,3 @@
-use crate::contract::island::IslandTone;
 use std::{
     sync::{
         Arc,
@@ -153,17 +152,13 @@ fn dispatch_global_action(app: &AppHandle, state: &AppState, action: GlobalHotke
             }
         }
         GlobalHotkeyAction::ResetSession => {
-            let replay_running = match state.replay_running() {
-                Ok(replay_running) => replay_running,
+            let active = match state.is_capture_or_replay_active() {
+                Ok(active) => active,
                 Err(error) => {
                     log::error!("check replay from global hotkey failed: {:?}", error.code);
                     return;
                 }
             };
-            let active = matches!(
-                state.capture_phase(),
-                LiveCapturePhase::Starting | LiveCapturePhase::Running | LiveCapturePhase::Stopping
-            ) || replay_running;
             if active {
                 request_main_confirmation(app, "reset");
             } else {
@@ -174,17 +169,7 @@ fn dispatch_global_action(app: &AppHandle, state: &AppState, action: GlobalHotke
                         return;
                     }
                 };
-                state.publish_island_notice(
-                    IslandTone::Success,
-                    if undo_token.is_some() {
-                        "Session reset. Use Undo within 5 seconds."
-                    } else {
-                        "Stats reset"
-                    },
-                    Vec::new(),
-                    undo_token,
-                );
-                let _ = super::island::show_notice(app, state);
+                super::island::publish_reset_notice(app, state, undo_token);
             }
         }
         GlobalHotkeyAction::ToggleHud => {

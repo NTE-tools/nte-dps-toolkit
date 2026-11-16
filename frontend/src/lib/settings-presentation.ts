@@ -24,7 +24,9 @@ export const useSettingsPresentation = create<InterfaceSettingsSnapshot>(
 
 useSettingsPresentation.subscribe((next) => {
   applyDocumentPresentation(next);
-  setFrontendLanguage(next.language);
+  void setFrontendLanguage(next.language).catch((error: unknown) => {
+    console.error("load frontend language dictionary failed", error);
+  });
 });
 
 window.addEventListener("storage", (event) => {
@@ -43,7 +45,9 @@ export function applySettingsPresentation(
 export function bootstrapSettingsPresentation(): void {
   const presentation = useSettingsPresentation.getState();
   applyDocumentPresentation(presentation);
-  setFrontendLanguage(presentation.language);
+  void setFrontendLanguage(presentation.language).catch((error: unknown) => {
+    console.error("load frontend language dictionary failed", error);
+  });
 }
 
 function replacePresentation(next: InterfaceSettingsSnapshot): boolean {

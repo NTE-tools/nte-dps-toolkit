@@ -70,7 +70,7 @@ export function ConsoleCommandPalette({
       <DialogPortal>
         <DialogBackdrop />
         <DialogPopup
-          className="ui-motion-dialog top-[clamp(1rem,12vh,4.5rem)] left-1/2 flex max-h-[min(32rem,calc(100vh-2rem))] w-[calc(100vw-1.5rem)] max-w-xl -translate-x-1/2 flex-col overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-2xl"
+          className="top-[clamp(1rem,12vh,4.5rem)] left-1/2 flex max-h-[min(32rem,calc(100vh-2rem))] w-[calc(100vw-1.5rem)] max-w-xl -translate-x-1/2 flex-col overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-xl"
           initialFocus={inputRef}
         >
           <DialogTitle className="sr-only">{t("Command palette")}</DialogTitle>

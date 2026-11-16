@@ -1,9 +1,10 @@
 import { invokeCommand, type CommandError } from "@/lib/tauri/command-error";
 import type { SkillsEvent } from "@/lib/tauri/generated/SkillsEvent";
 import type { SkillsSnapshot } from "@/lib/tauri/generated/SkillsSnapshot";
+import type { TimelineScope } from "@/lib/tauri/generated/TimelineScope";
 import { subscribeStream } from "@/lib/tauri/stream-client";
 
-export type SkillsScope = "all" | "upper" | "lower";
+type SkillsScope = TimelineScope;
 
 export const skillsClient = {
   getSnapshot: (scope: SkillsScope) =>

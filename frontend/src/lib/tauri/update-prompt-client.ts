@@ -1,13 +1,14 @@
 import { listen } from "@tauri-apps/api/event";
 
 import { invokeCommand } from "@/lib/tauri/command-error";
+import type { UpdateComponent } from "@/lib/tauri/generated/UpdateComponent";
 import type { UpdatePromptSnapshot } from "@/lib/tauri/generated/UpdatePromptSnapshot";
 
 const UPDATE_AVAILABLE_EVENT = "update-available";
 
 export const updatePromptClient = {
   get: () => invokeCommand<UpdatePromptSnapshot>("get_main_dps_update_prompt"),
-  download: (component: "app" | "mods-plugin") =>
+  download: (component: UpdateComponent) =>
     invokeCommand<UpdatePromptSnapshot>("download_main_dps_update", {
       component,
     }),

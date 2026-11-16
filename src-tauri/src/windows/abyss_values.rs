@@ -1,10 +1,15 @@
-use std::{sync::mpsc, thread, time::Duration};
+use std::time::Duration;
 
 use tauri::{LogicalPosition, LogicalSize, WebviewWindow, WindowEvent};
 
-use crate::{contract::CommandError, state::AppState, windows::window_position};
+use crate::{
+    contract::CommandError,
+    state::AppState,
+    windows::window_position::{self, DebouncedEvent, WindowPersistenceRuntime},
+};
 
 pub(crate) const ABYSS_VALUES_WINDOW_LABEL: &str = "abyss-values";
+const GEOMETRY_SAVE_DEBOUNCE: Duration = Duration::from_millis(180);
 
 pub(crate) fn validate_window(window: &WebviewWindow) -> Result<(), CommandError> {
     if window.label() == ABYSS_VALUES_WINDOW_LABEL {
@@ -46,38 +51,24 @@ pub(crate) fn show(window: &WebviewWindow, state: &AppState) -> Result<(), Comma
     window.set_focus().map_err(window_error)
 }
 
-pub(crate) fn initialize(window: &WebviewWindow, state: &AppState) -> Result<(), String> {
-    let (sender, receiver) = mpsc::channel::<Option<([f32; 2], [f32; 2])>>();
+pub(crate) fn initialize(
+    window: &WebviewWindow,
+    state: &AppState,
+    persistence: &WindowPersistenceRuntime,
+) -> Result<(), String> {
     let persistence_state = state.clone();
-    thread::Builder::new()
-        .name("tauri-abyss-values-geometry-save".to_owned())
-        .spawn(move || {
-            while let Ok(Some(mut latest)) = receiver.recv() {
-                loop {
-                    match receiver.recv_timeout(Duration::from_millis(180)) {
-                        Ok(Some(next)) => latest = next,
-                        Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            if let Err(error) =
-                                persistence_state.set_abyss_window_geometry(latest.0, latest.1)
-                            {
-                                log::error!("persist Abyss Values window geometry failed: {error}");
-                            }
-                            return;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    }
-                }
-                if let Err(error) = persistence_state.set_abyss_window_geometry(latest.0, latest.1)
-                {
-                    log::error!("persist Abyss Values window geometry failed: {error}");
-                }
+    let sender = persistence.spawn_debounced(
+        "tauri-abyss-values-geometry-save",
+        GEOMETRY_SAVE_DEBOUNCE,
+        move |(size, position): ([f32; 2], [f32; 2])| {
+            if let Err(error) = persistence_state.set_abyss_window_geometry(size, position) {
+                log::error!("persist Abyss Values window geometry failed: {error}");
             }
-        })
-        .map_err(|error| error.to_string())?;
+        },
+    )?;
 
     let close_window = window.clone();
     let event_window = window.clone();
-    let event_sender = sender.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::Moved(_)
         | WindowEvent::Resized(_)
@@ -99,7 +90,10 @@ pub(crate) fn initialize(window: &WebviewWindow, state: &AppState) -> Result<(),
             };
             let position = position.to_logical::<f32>(scale);
             let size = size.to_logical::<f32>(scale);
-            let _ = event_sender.send(Some(([size.width, size.height], [position.x, position.y])));
+            let _ = sender.send(DebouncedEvent::Changed((
+                [size.width, size.height],
+                [position.x, position.y],
+            )));
         }
         WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
@@ -108,7 +102,7 @@ pub(crate) fn initialize(window: &WebviewWindow, state: &AppState) -> Result<(),
             }
         }
         WindowEvent::Destroyed => {
-            let _ = event_sender.send(None);
+            let _ = sender.send(DebouncedEvent::Shutdown);
         }
         _ => {}
     });

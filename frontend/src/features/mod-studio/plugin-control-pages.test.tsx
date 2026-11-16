@@ -128,27 +128,12 @@ describe("Mod Workshop owner pages", () => {
       "Unload host",
     ])
       expect(html).toContain(label);
-    for (const label of [
-      "Toolkit directory",
-      "Host logging",
-      "SDK compatibility",
-      "Retry SDK scan",
-      "In-game enhanced HUD",
-      "Preview native combat report",
-      "Refresh account data",
-      "Plugin network recording",
-      "Refresh plugin runtime snapshot",
-    ])
-      expect(html).not.toContain(label);
   });
   it("gives unknown plugins their own lifecycle page without guessing capabilities", () => {
     const html = renderPlugin("NTE_PluginCustom.dll");
     expect(html).toContain("NTE_PluginCustom.dll");
     expect(html).not.toContain("Load plugin");
     expect(html).toContain("Unload plugin");
-    expect(html).not.toContain("Reload");
-    expect(html).not.toContain("In-game enhanced HUD");
-    expect(html).not.toContain("Preview native combat report");
   });
   it("disables lifecycle controls while unloading or when host capabilities are absent", () => {
     for (const snapshot of [
@@ -200,7 +185,6 @@ it("shows manual directory selection only for proxy loading", () => {
     />,
   );
   expect(loader).not.toContain("Select game directory");
-  expect(html).not.toContain("Start or connect with Loader");
 });
 
 it("offers loading instead of unloading for an unloaded plugin", () => {

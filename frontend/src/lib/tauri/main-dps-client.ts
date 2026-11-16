@@ -1,12 +1,15 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { invokeCommand, type CommandError } from "@/lib/tauri/command-error";
+import type { AbyssHalf } from "@/lib/tauri/generated/AbyssHalf";
+import type { CaptureReplayKind } from "@/lib/tauri/generated/CaptureReplayKind";
+import type { ConsoleShortcutTarget } from "@/lib/tauri/generated/ConsoleShortcutTarget";
 import type { HudPreset } from "@/lib/tauri/generated/HudPreset";
 import type { MainDpsActionResult } from "@/lib/tauri/generated/MainDpsActionResult";
+import type { MainDpsDetailFilter } from "@/lib/tauri/generated/MainDpsDetailFilter";
 import type { MainDpsEvent } from "@/lib/tauri/generated/MainDpsEvent";
 import type { MainDpsResetResult } from "@/lib/tauri/generated/MainDpsResetResult";
 import type { MainDpsSnapshot } from "@/lib/tauri/generated/MainDpsSnapshot";
-import type { MainDpsDetailFilter } from "@/lib/tauri/main-dps-detail-client";
 import { subscribeStream } from "@/lib/tauri/stream-client";
 
 const snapshot = (command: string, arguments_?: Record<string, unknown>) =>
@@ -31,14 +34,14 @@ export const mainDpsClient = {
   setPaused: (paused: boolean) => snapshot("set_main_dps_paused", { paused }),
   selectRound: (recordId: string | null) =>
     snapshot("select_main_dps_round", { recordId }),
-  selectAbyssHalf: (half: "all" | "first" | "second") =>
+  selectAbyssHalf: (half: AbyssHalf | null) =>
     snapshot("select_main_dps_abyss_half", { half }),
   setAlwaysOnTop: (enabled: boolean) =>
     snapshot("set_main_dps_always_on_top", { enabled }),
   setAppearance: (darkMode: boolean, opacity: number) =>
     snapshot("set_main_dps_appearance", { darkMode, opacity }),
   openConsole: () => command("open_main_dps_console"),
-  openConsoleShortcut: (target: "palette" | "packets") =>
+  openConsoleShortcut: (target: ConsoleShortcutTarget) =>
     command("open_main_dps_console_shortcut", { target }),
   openHud: () => command("open_main_dps_hud"),
   openCharacterDetails: (characterId: number) =>
@@ -50,7 +53,7 @@ export const mainDpsClient = {
   minimize: () => command("minimize_main_dps_window"),
   toggleMaximized: () => command("toggle_main_dps_maximized"),
   close: () => command("close_main_dps_window"),
-  importReplay: (kind: "json" | "pcapng", replaceCurrent = false) =>
+  importReplay: (kind: CaptureReplayKind, replaceCurrent = false) =>
     invokeCommand<MainDpsActionResult>("import_main_dps_replay", {
       kind,
       replaceCurrent,

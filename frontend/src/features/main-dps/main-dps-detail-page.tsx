@@ -4,14 +4,15 @@ import {
   LoaderCircle,
   RefreshCw,
   SlidersHorizontal,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { FloatingActionNotice } from "@/components/nte/action-notice";
 import { DesktopTitlebar } from "@/components/nte/desktop-titlebar";
 import { MaxHpCompressionEffect } from "@/components/nte/max-hp-compression-effect";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/form-controls";
+import { Switch } from "@/components/ui/switch";
 import {
   Popover,
   PopoverPopup,
@@ -21,6 +22,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useCharacterAvatar } from "@/hooks/use-character-avatar";
+import { useCloseOnWindowBlur } from "@/hooks/use-close-on-window-blur";
 import { cleanupAsyncRegistration } from "@/lib/async-cleanup";
 import { t, tf, useFrontendLanguage } from "@/lib/i18n";
 import { useSettingsPresentation } from "@/lib/settings-presentation";
@@ -67,13 +69,9 @@ export function MainDpsDetailPage() {
     DEFAULT_DETAIL_COLUMNS,
   );
   const loadingMoreRef = useRef(false);
+  const resizingColumnsRef = useRef(false);
 
-  useEffect(() => {
-    if (!columnsOpen) return;
-    const closeColumnsOnWindowBlur = () => setColumnsOpen(false);
-    window.addEventListener("blur", closeColumnsOnWindowBlur);
-    return () => window.removeEventListener("blur", closeColumnsOnWindowBlur);
-  }, [columnsOpen]);
+  useCloseOnWindowBlur(columnsOpen, () => setColumnsOpen(false));
 
   const acceptSnapshot = useCallback((next: MainDpsDetailSnapshot) => {
     setSnapshot(next);
@@ -130,8 +128,14 @@ export function MainDpsDetailPage() {
     [acceptSnapshot, pending],
   );
 
+  const previewColumns = useCallback((next: MainDpsDetailColumns) => {
+    resizingColumnsRef.current = true;
+    setColumns(next);
+  }, []);
+
   const persistColumns = useCallback(
     (next: MainDpsDetailColumns) => {
+      resizingColumnsRef.current = false;
       setColumns(next);
       void mainDpsDetailClient
         .setColumns(next)
@@ -172,7 +176,9 @@ export function MainDpsDetailPage() {
           const merged = mergeLiveDetailSnapshot(current, next);
           return merged;
         });
-        setColumns(next.columns);
+        if (!resizingColumnsRef.current) {
+          setColumns(next.columns);
+        }
       },
       (streamError) => setError(errorText(streamError)),
     );
@@ -187,12 +193,11 @@ export function MainDpsDetailPage() {
   return (
     <div className="desktop-window-shell">
       {error !== null && (
-        <div className="fixed inset-x-0 top-3 z-50 mx-auto flex w-fit max-w-[min(92vw,36rem)] items-center gap-3 rounded-xl border border-destructive/30 bg-background/95 px-4 py-3 text-sm text-destructive shadow-lg backdrop-blur">
-          <span>{error}</span>
-          <button aria-label={t("Close")} onClick={() => setError(null)}>
-            <X className="size-4" />
-          </button>
-        </div>
+        <FloatingActionNotice
+          status="error"
+          message={error}
+          onDismiss={() => setError(null)}
+        />
       )}
       <DesktopTitlebar
         title={title}
@@ -236,6 +241,7 @@ export function MainDpsDetailPage() {
                     </span>
                     <label className="relative min-w-52 flex-1 sm:max-w-80">
                       <NativeSelect
+                        aria-label={t("Specific Move")}
                         className="h-8 appearance-none pr-8"
                         value={snapshot.skillFilter ?? ""}
                         disabled={pending}
@@ -344,30 +350,29 @@ export function MainDpsDetailPage() {
                         <label
                           key={column}
                           className={cn(
-                            "flex items-center gap-2 text-sm",
+                            "flex items-center justify-between gap-3 text-sm",
                             snapshot.kind === "character" &&
                               column === "character" &&
                               "hidden",
                           )}
                         >
-                          <input
-                            type="checkbox"
+                          <span>{columnLabel(column)}</span>
+                          <Switch
                             checked={detailColumnVisible(columns, column)}
                             disabled={
                               detailColumnVisible(columns, column) &&
                               detailColumnsFor(snapshot, columns).length === 1
                             }
-                            onChange={(event) =>
+                            onCheckedChange={(checked) =>
                               persistColumns(
                                 setDetailColumnVisible(
                                   columns,
                                   column,
-                                  event.target.checked,
+                                  checked,
                                 ),
                               )
                             }
                           />
-                          {columnLabel(column)}
                         </label>
                       ))}
                       <Button
@@ -390,7 +395,7 @@ export function MainDpsDetailPage() {
               pending={pending}
               loadMore={loadMore}
               persistColumns={persistColumns}
-              previewColumns={setColumns}
+              previewColumns={previewColumns}
               clearFilters={() => void setView("all", null, null)}
               startCapture={() => void runEmptyAction("start")}
               importReplay={() => void runEmptyAction("import")}
@@ -795,11 +800,27 @@ function ResizableHeader({
   previewColumns(columns: MainDpsDetailColumns): void;
   persistColumns(columns: MainDpsDetailColumns): void;
 }) {
+  const cleanupDragRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    return () => {
+      cleanupDragRef.current?.();
+    };
+  }, []);
+
   const beginResize = (event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
+    cleanupDragRef.current?.();
     const startX = event.clientX;
     const startWidth = detailColumnWidth(columns, column);
     let latest = columns;
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+      if (cleanupDragRef.current === cleanup) {
+        cleanupDragRef.current = null;
+      }
+    };
     const move = (moveEvent: PointerEvent) => {
       latest = setDetailColumnWidth(
         columns,
@@ -809,12 +830,17 @@ function ResizableHeader({
       previewColumns(latest);
     };
     const finish = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
+      cleanup();
       persistColumns(latest);
     };
+    const cancel = () => {
+      cleanup();
+      persistColumns(columns);
+    };
+    cleanupDragRef.current = cleanup;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", cancel, { once: true });
   };
   return (
     <th className="relative border-r px-2 py-2 font-medium last:border-r-0">
@@ -920,7 +946,6 @@ function HitRow({
               data-direction={row.direction}
               title={`${row.typeLabel} ${row.typeDetail ?? ""}\n${row.skill}\n${row.damageType}`}
             >
-              <span className="main-dps-hit-type-marker" aria-hidden="true" />
               {row.reactionTextKey === null ? (
                 <span className="flex min-w-0 items-center text-xs">
                   <span className="truncate font-medium">{row.typeLabel}</span>
@@ -1021,7 +1046,6 @@ function HitRow({
                 <span className="truncate">{row.target}</span>
                 {row.maxHpReduction !== null && row.maxHpReduction > 0 && (
                   <MaxHpCompressionEffect
-                    key={row.maxHpReduction}
                     label={t("Max HP reduction")}
                     value={formatMainMetric(row.maxHpReduction)}
                     percentage={hpCompression.reductionPercent}

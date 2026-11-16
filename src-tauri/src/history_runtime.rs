@@ -1,12 +1,11 @@
 use std::{
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use nte_dps_tool::core::sync::lock_or_repair;
 use nte_dps_tool::storage::history::load_history_summaries;
 use nte_dps_tool::storage::i18n::{self, Language};
 use tauri::{async_runtime::JoinHandle, ipc::Channel};
@@ -16,7 +15,6 @@ use crate::{
     contract::{
         CommandError,
         history::{HistoryEvent, HistorySnapshot},
-        stream::MAX_STREAM_DELIVERY_BYTES,
     },
     state::{AppState, HistoryRuntimeError, StreamRegistration},
 };
@@ -64,50 +62,23 @@ struct CachedHistoryProjection {
 }
 
 impl HistoryProjectionCache {
-    fn lookup(
-        &self,
-        key: HistoryProjectionKey,
-    ) -> Result<Option<Arc<CachedHistoryProjection>>, HistoryRuntimeError> {
-        let entry = self.lock_entry()?;
-        Ok(entry.as_ref().filter(|entry| entry.key == key).cloned())
+    fn lookup(&self, key: HistoryProjectionKey) -> Option<Arc<CachedHistoryProjection>> {
+        let entry = self.entry.lock().expect("history projection cache lock");
+        entry.as_ref().filter(|entry| entry.key == key).cloned()
     }
 
-    fn publish(
-        &self,
-        projection: CachedHistoryProjection,
-    ) -> Result<Arc<CachedHistoryProjection>, HistoryRuntimeError> {
-        let mut entry = self.lock_entry()?;
+    fn publish(&self, projection: CachedHistoryProjection) -> Arc<CachedHistoryProjection> {
+        let mut entry = self.entry.lock().expect("history projection cache lock");
         if let Some(cached) = entry.as_ref().filter(|cached| cached.key == projection.key) {
-            return Ok(Arc::clone(cached));
+            return Arc::clone(cached);
         }
         let projection = Arc::new(projection);
         *entry = Some(Arc::clone(&projection));
-        Ok(projection)
+        projection
     }
 
     fn clear(&self) {
-        *lock_or_repair(&self.entry, |_| {}).0 = None;
-    }
-
-    fn lock_entry(
-        &self,
-    ) -> Result<MutexGuard<'_, Option<Arc<CachedHistoryProjection>>>, HistoryRuntimeError> {
-        let (entry, recovered) = lock_or_repair(&self.entry, |entry| *entry = None);
-        if recovered {
-            return Err(HistoryRuntimeError::Unavailable);
-        }
-        Ok(entry)
-    }
-}
-
-#[cfg(test)]
-impl HistoryProjectionKey {
-    fn fixture(revision: u64, language: Language, character_catalog_identity: usize) -> Self {
-        Self {
-            revision,
-            language,
-            character_catalog_identity,
-        }
+        *self.entry.lock().expect("history projection cache lock") = None;
     }
 }
 
@@ -164,7 +135,11 @@ impl HistoryRuntime {
 
     pub(crate) fn shutdown(&self) -> bool {
         self.stop.store(true, Ordering::Release);
-        let maintenance = lock_or_repair(&self.maintenance, |_| {}).0.take();
+        let maintenance = self
+            .maintenance
+            .lock()
+            .expect("history maintenance lock")
+            .take();
         if let Some(task) = &maintenance {
             task.abort();
         }
@@ -219,12 +194,7 @@ async fn run_history_stream(
         }
 
         let body = HistoryEvent::Snapshot(projection.snapshot.as_ref().clone());
-        if serde_json::to_vec(&body)
-            .map(|encoded| encoded.len() > MAX_STREAM_DELIVERY_BYTES)
-            .unwrap_or(true)
-            || !stream.registration.begin_delivery()
-            || stream.on_event.send(body).is_err()
-        {
+        if !stream.registration.begin_delivery() || stream.on_event.send(body).is_err() {
             break;
         }
         last_projection_key = Some(projection.key);
@@ -258,7 +228,7 @@ fn cached_history_stream_projection_with(
     load: impl FnOnce() -> nte_dps_tool::storage::history::HistoryLoadResult,
 ) -> Result<Option<Arc<CachedHistoryProjection>>, HistoryRuntimeError> {
     let key = state.with_history_transaction(|| history_projection_key(state))?;
-    if let Some(projection) = cache.lookup(key)? {
+    if let Some(projection) = cache.lookup(key) {
         return Ok(Some(projection));
     }
 
@@ -276,12 +246,10 @@ fn cached_history_stream_projection_with(
     if state.with_history_transaction(|| history_projection_key(state))? != key {
         return Ok(None);
     }
-    cache
-        .publish(CachedHistoryProjection {
-            key,
-            snapshot: Arc::new(snapshot),
-        })
-        .map(Some)
+    Ok(Some(cache.publish(CachedHistoryProjection {
+        key,
+        snapshot: Arc::new(snapshot),
+    })))
 }
 
 #[cfg(test)]
@@ -316,15 +284,25 @@ mod tests {
     fn revision_and_language_context_changes_rebuild_the_projection() {
         let cache = HistoryProjectionCache::default();
         let keys = [
-            HistoryProjectionKey::fixture(7, Language::English, 11),
-            HistoryProjectionKey::fixture(8, Language::English, 11),
-            HistoryProjectionKey::fixture(8, Language::Japanese, 11),
+            HistoryProjectionKey {
+                revision: 7,
+                language: Language::English,
+                character_catalog_identity: 11,
+            },
+            HistoryProjectionKey {
+                revision: 8,
+                language: Language::English,
+                character_catalog_identity: 11,
+            },
+            HistoryProjectionKey {
+                revision: 8,
+                language: Language::Japanese,
+                character_catalog_identity: 11,
+            },
         ];
         for key in keys {
-            assert!(cache.lookup(key).expect("lookup projection").is_none());
-            cache
-                .publish(fixture_projection(key))
-                .expect("publish projection");
+            assert!(cache.lookup(key).is_none());
+            cache.publish(fixture_projection(key));
         }
     }
 
@@ -341,12 +319,7 @@ mod tests {
         })
         .expect("stale scan is not a runtime failure");
         assert!(projection.is_none());
-        assert!(
-            cache
-                .lookup(stale_key)
-                .expect("lookup projection")
-                .is_none()
-        );
+        assert!(cache.lookup(stale_key).is_none());
     }
 
     #[test]

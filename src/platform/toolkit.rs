@@ -130,6 +130,8 @@ impl Handle {
         match unsafe { WaitForSingleObject(self.0, ms) } {
             WAIT_OBJECT_0 => Ok(MutexGuard(self)),
             WAIT_ABANDONED => {
+                // SAFETY: `WAIT_ABANDONED` transfers ownership of the mutex to this thread,
+                // so releasing it immediately restores unlock state before returning the error.
                 unsafe {
                     ReleaseMutex(self.0);
                 }
@@ -142,6 +144,7 @@ impl Handle {
 }
 impl Drop for Handle {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a valid, exclusively owned Win32 kernel handle.
         unsafe {
             CloseHandle(self.0);
         }
@@ -150,6 +153,7 @@ impl Drop for Handle {
 struct MutexGuard<'a>(&'a Handle);
 impl Drop for MutexGuard<'_> {
     fn drop(&mut self) {
+        // SAFETY: `MutexGuard` is only constructed after acquiring `self.0.0` via `WaitForSingleObject`.
         unsafe {
             ReleaseMutex(self.0.0);
         }
@@ -158,6 +162,7 @@ impl Drop for MutexGuard<'_> {
 struct Mapping(*mut u8);
 impl Drop for Mapping {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null view base returned by `MapViewOfFile` and owned by `Mapping`.
         unsafe {
             UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
                 Value: self.0.cast(),
@@ -246,21 +251,56 @@ impl ToolkitClient {
             Ok(result)
         }
     }
-    // SAFETY: All offsets below are fixed ABI offsets inside REGION_BYTES;
-    // all accesses happen while the OS gate is held. Volatile access avoids
-    // creating Rust references to concurrently mapped foreign memory.
     fn u32(&self, offset: usize) -> u32 {
+        assert!(
+            offset
+                .checked_add(std::mem::size_of::<u32>())
+                .is_some_and(|end| end <= REGION_BYTES)
+                && offset.is_multiple_of(std::mem::align_of::<u32>()),
+            "shared-memory u32 offset out of bounds or unaligned"
+        );
+        // SAFETY: `self.view.0` is a page-aligned `REGION_BYTES` mapping, `offset` is
+        // verified in-bounds and 4-byte aligned, the OS gate is held by the caller,
+        // and volatile access avoids creating Rust references to shared foreign memory.
         unsafe { ptr::read_volatile(self.view.0.add(offset).cast()) }
     }
     fn u64(&self, offset: usize) -> u64 {
+        assert!(
+            offset
+                .checked_add(std::mem::size_of::<u64>())
+                .is_some_and(|end| end <= REGION_BYTES)
+                && offset.is_multiple_of(std::mem::align_of::<u64>()),
+            "shared-memory u64 offset out of bounds or unaligned"
+        );
+        // SAFETY: `self.view.0` is a page-aligned `REGION_BYTES` mapping, `offset` is
+        // verified in-bounds and 8-byte aligned, the OS gate is held by the caller,
+        // and volatile access avoids creating Rust references to shared foreign memory.
         unsafe { ptr::read_volatile(self.view.0.add(offset).cast()) }
     }
     fn put32(&self, offset: usize, value: u32) {
+        assert!(
+            offset
+                .checked_add(std::mem::size_of::<u32>())
+                .is_some_and(|end| end <= REGION_BYTES)
+                && offset.is_multiple_of(std::mem::align_of::<u32>()),
+            "shared-memory u32 offset out of bounds or unaligned"
+        );
+        // SAFETY: `self.view.0` is a page-aligned writable `REGION_BYTES` mapping,
+        // `offset` is verified in-bounds and 4-byte aligned, and the OS gate is held.
         unsafe {
             ptr::write_volatile(self.view.0.add(offset).cast(), value);
         }
     }
     fn put64(&self, offset: usize, value: u64) {
+        assert!(
+            offset
+                .checked_add(std::mem::size_of::<u64>())
+                .is_some_and(|end| end <= REGION_BYTES)
+                && offset.is_multiple_of(std::mem::align_of::<u64>()),
+            "shared-memory u64 offset out of bounds or unaligned"
+        );
+        // SAFETY: `self.view.0` is a page-aligned writable `REGION_BYTES` mapping,
+        // `offset` is verified in-bounds and 8-byte aligned, and the OS gate is held.
         unsafe {
             ptr::write_volatile(self.view.0.add(offset).cast(), value);
         }
@@ -336,6 +376,9 @@ impl ToolkitClient {
                     let offset = self.u32(RESPONSE + 28) as usize;
                     validate_page(bytes, total, offset)?;
                     let mut payload = vec![0; bytes];
+                    // SAFETY: `validate_page` guarantees `bytes <= PAGE_BYTES` so
+                    // `RESPONSE + 32 + bytes <= REGION_BYTES`; `payload` is freshly allocated
+                    // with length `bytes` and does not overlap the shared-memory mapping.
                     unsafe {
                         ptr::copy_nonoverlapping(
                             self.view.0.add(RESPONSE + 32),

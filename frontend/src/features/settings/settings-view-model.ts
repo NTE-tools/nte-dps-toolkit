@@ -9,31 +9,10 @@ export type SettingsPageState =
   | { status: "ready"; snapshot: SettingsSnapshot }
   | { status: "error"; error: CommandError };
 
-export interface HudModuleMove {
+interface HudModuleMove {
   dragged: HudModule;
   target: HudModule;
   insertAfter: boolean;
-}
-
-export type SettingsPendingSection =
-  | "interface"
-  | "update"
-  | "capture"
-  | "hotkeys"
-  | "layout"
-  | "main-dps-display"
-  | "team-data"
-  | "capture-files"
-  | "abyss-values"
-  | "hud-window"
-  | "hud-modules"
-  | "hud-editor";
-
-export function settingsSectionPending(
-  pendingAction: string | null,
-  _section: SettingsPendingSection,
-): boolean {
-  return pendingAction !== null;
 }
 
 export function shouldAcceptSettingsGeneration(

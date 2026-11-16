@@ -68,10 +68,12 @@ export function buildTimelineChartModel(
   const viewRange =
     clampTimelineZoom(requestedViewRange ?? null, duration) ??
     ([0, duration] as const);
-  const rolePeak = snapshot.buckets.reduce(
-    (peak, bucket) => Math.max(peak, ...bucket.roles.map((role) => role.dps)),
-    0,
-  );
+  let rolePeak = 0;
+  for (const bucket of snapshot.buckets) {
+    for (const role of bucket.roles) {
+      if (role.dps > rolePeak) rolePeak = role.dps;
+    }
+  }
   const maxDps = Math.max(
     1,
     mode === "team" ? snapshot.peakDps : Math.max(rolePeak, snapshot.peakDps),

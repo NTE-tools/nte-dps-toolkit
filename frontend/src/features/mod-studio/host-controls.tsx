@@ -97,7 +97,7 @@ export function HostControls({
       >
         <AlertDialogPortal>
           <AlertDialogBackdrop />
-          <AlertDialogPopup className="left-1/2 top-1/2 flex w-[min(90vw,30rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-lg">
+          <AlertDialogPopup className="left-1/2 top-1/2 flex w-[min(90vw,30rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border bg-background p-6 shadow-xl">
             <AlertDialogTitle>
               {t("Force overwrite proxy files?")}
             </AlertDialogTitle>
@@ -112,6 +112,7 @@ export function HostControls({
             <div className="flex justify-end gap-2">
               <Button
                 variant="outline"
+                autoFocus
                 disabled={pending}
                 onClick={() => setConfirmOverwrite(false)}
               >

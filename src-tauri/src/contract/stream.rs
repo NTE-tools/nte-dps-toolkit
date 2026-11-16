@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub(crate) const MAX_STREAM_DELIVERY_BYTES: usize = 14 * 1024 * 1024;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -38,4 +36,9 @@ impl StreamKind {
     pub(crate) fn stream_key(self, subscription_id: &str) -> String {
         format!("{}:{subscription_id}", self.code())
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    pub(crate) const MAX_STREAM_DELIVERY_BYTES: usize = 14 * 1024 * 1024;
 }

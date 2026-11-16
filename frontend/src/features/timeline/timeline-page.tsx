@@ -62,9 +62,12 @@ export function TimelinePage() {
     null,
   );
 
+  const snapshotBucketSeconds = snapshot?.bucketSeconds;
   useEffect(() => {
-    if (snapshot) setDraftBucketSeconds(snapshot.bucketSeconds);
-  }, [snapshot]);
+    if (snapshotBucketSeconds !== undefined) {
+      setDraftBucketSeconds(snapshotBucketSeconds);
+    }
+  }, [snapshotBucketSeconds]);
 
   useEffect(() => {
     if (

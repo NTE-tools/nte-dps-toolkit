@@ -5,13 +5,17 @@ use nte_dps_tool::{
         empty_curtain::{
             RecommendedLoadoutError, build_drive_calculator_inventory, recommended_loadout,
         },
+        equipment_runtime::{
+            EQUIPMENT_CONFIRMED_MESSAGE_KEY, EQUIPMENT_CONFIRMING_MESSAGE_KEY,
+            EQUIPMENT_IDLE_MESSAGE_KEY, EQUIPMENT_SENDING_MESSAGE_KEY, EmptyCurtainOperationState,
+            EquipmentOperation, EquipmentOperationError, EquipmentPlacement,
+        },
         snapshot::{
             CHARACTER_LOADOUT_MAX_JSON_BYTES, CharacterLoadoutError, export_character_loadout_json,
             parse_character_loadout_json, validate_character_loadout,
         },
     },
     engine::model::HtItemNetId,
-    platform::mods_plugin::{ModsPluginOperation, ModsPluginPlacement},
     storage::{i18n, io_util::atomic_write_text},
 };
 use serde::Deserialize;
@@ -25,7 +29,6 @@ use crate::{
             EmptyCurtainFileResult, EmptyCurtainPositionSnapshot, EmptyCurtainSnapshot,
         },
     },
-    equipment_operation_service::{EmptyCurtainOperationState, EquipmentOperationError},
     file_dialog::{self, DialogOutcome},
     state::{AppState, EmptyCurtainRuntimeError},
     windows::console,
@@ -159,28 +162,28 @@ fn manage_empty_curtain_item_inner(
         match action {
             EquipmentAction::Lock => Ok::<_, CommandError>((
                 HtItemNetId::ZERO,
-                ModsPluginOperation::SetItemLocked {
+                EquipmentOperation::SetItemLocked {
                     equipment: item.id,
                     locked: true,
                 },
             )),
             EquipmentAction::Unlock => Ok((
                 HtItemNetId::ZERO,
-                ModsPluginOperation::SetItemLocked {
+                EquipmentOperation::SetItemLocked {
                     equipment: item.id,
                     locked: false,
                 },
             )),
             EquipmentAction::Discard => Ok((
                 HtItemNetId::ZERO,
-                ModsPluginOperation::SetItemDiscarded {
+                EquipmentOperation::SetItemDiscarded {
                     equipment: item.id,
                     discarded: true,
                 },
             )),
             EquipmentAction::Restore => Ok((
                 HtItemNetId::ZERO,
-                ModsPluginOperation::SetItemDiscarded {
+                EquipmentOperation::SetItemDiscarded {
                     equipment: item.id,
                     discarded: false,
                 },
@@ -189,10 +192,10 @@ fn manage_empty_curtain_item_inner(
                 let equipped = item.character_net_id.ok_or_else(item_not_equipped)?;
                 let operation = match definition.kind {
                     nte_dps_tool::engine::parser::EquipmentKind::Module => {
-                        ModsPluginOperation::UnequipModule { equipment: item.id }
+                        EquipmentOperation::UnequipModule { equipment: item.id }
                     }
                     nte_dps_tool::engine::parser::EquipmentKind::Core => {
-                        ModsPluginOperation::UnequipCore { equipment: item.id }
+                        EquipmentOperation::UnequipCore { equipment: item.id }
                     }
                 };
                 Ok((equipped, operation))
@@ -208,10 +211,10 @@ fn manage_empty_curtain_item_inner(
                     .is_some_and(|equipped| equipped != target.net_id);
                 let operation = match definition.kind {
                     nte_dps_tool::engine::parser::EquipmentKind::Core if moving => {
-                        ModsPluginOperation::MoveCoreToCharacter { equipment: item.id }
+                        EquipmentOperation::MoveCoreToCharacter { equipment: item.id }
                     }
                     nte_dps_tool::engine::parser::EquipmentKind::Core => {
-                        ModsPluginOperation::EquipCore { equipment: item.id }
+                        EquipmentOperation::EquipCore { equipment: item.id }
                     }
                     nte_dps_tool::engine::parser::EquipmentKind::Module => {
                         let row = row.ok_or_else(position_required)?;
@@ -226,13 +229,13 @@ fn manage_empty_curtain_item_inner(
                             return Err(position_required());
                         }
                         if moving {
-                            ModsPluginOperation::MoveModuleToCharacter {
+                            EquipmentOperation::MoveModuleToCharacter {
                                 equipment: item.id,
                                 row,
                                 column,
                             }
                         } else {
-                            ModsPluginOperation::EquipModule {
+                            EquipmentOperation::EquipModule {
                                 equipment: item.id,
                                 row,
                                 column,
@@ -278,13 +281,13 @@ fn apply_empty_curtain_character_action_inner(
             .find(|candidate| candidate.net_id == character_uid)
             .ok_or_else(character_unavailable)?;
         match action {
-            CharacterEquipmentAction::UnequipAll => Ok(ModsPluginOperation::UnequipAll),
+            CharacterEquipmentAction::UnequipAll => Ok(EquipmentOperation::UnequipAll),
             CharacterEquipmentAction::OneClick => recommended_loadout(character, &items, &catalog)
-                .map(|loadout| ModsPluginOperation::EquipOneKey {
+                .map(|loadout| EquipmentOperation::EquipOneKey {
                     placements: loadout
                         .placements
                         .into_iter()
-                        .map(|placement| ModsPluginPlacement {
+                        .map(|placement| EquipmentPlacement {
                             equipment: placement.equipment,
                             row: placement.row,
                             column: placement.column,
@@ -382,11 +385,11 @@ pub(crate) async fn import_empty_curtain_loadout(
     let loadout = validate_character_loadout(&file, &characters, &items, &catalog)?;
     let operation = (
         loadout.character.net_id,
-        ModsPluginOperation::EquipOneKey {
+        EquipmentOperation::EquipOneKey {
             placements: loadout
                 .placements
                 .into_iter()
-                .map(|placement| ModsPluginPlacement {
+                .map(|placement| EquipmentPlacement {
                     equipment: placement.equipment,
                     row: placement.row,
                     column: placement.column,
@@ -429,29 +432,15 @@ pub(crate) fn snapshot_with_operation(
     Ok(snapshot)
 }
 
-const CONFIRMING: &str =
-    "Equipment operation is awaiting confirmation. Synchronizing inventory; do not repeat it.";
-const CONFIRMATION_TIMEOUT: &str = "Equipment request was sent, but its result could not be confirmed. Check the game before retrying.";
 pub(crate) fn settle_equipment_confirmation(
     state: &AppState,
     identity: &str,
     data: Option<&nte_dps_tool::core::user_equipment::Inventory>,
 ) -> Result<bool, CommandError> {
-    use nte_dps_tool::core::equipment_runtime::ConfirmationState;
-    let service = state.equipment_service();
-    let outcome = service.inventory.settle_confirmation(identity, data)?;
-    match outcome {
-        Some(ConfirmationState::Waiting) => service.set("pending", CONFIRMING),
-        Some(ConfirmationState::Confirmed) => service.set(
-            "success",
-            "Equipment change confirmed by refreshed inventory.",
-        ),
-        Some(ConfirmationState::Expired | ConfirmationState::SourceChanged) => {
-            service.set("error", CONFIRMATION_TIMEOUT)
-        }
-        None => return Ok(false),
-    }?;
-    Ok(true)
+    state
+        .equipment_service()
+        .settle_confirmation(identity, data)
+        .map_err(CommandError::from)
 }
 impl From<nte_dps_tool::core::equipment_runtime::Error> for CommandError {
     fn from(error: nte_dps_tool::core::equipment_runtime::Error) -> Self {
@@ -482,9 +471,10 @@ impl From<nte_dps_tool::core::equipment_runtime::Error> for CommandError {
                 };
                 error
             }
-            Error::ConfirmationPending(_) => {
-                CommandError::new("equipment_confirmation_pending", CONFIRMING)
-            }
+            Error::ConfirmationPending(_) => CommandError::new(
+                "equipment_confirmation_pending",
+                EQUIPMENT_CONFIRMING_MESSAGE_KEY,
+            ),
             Error::Snapshot(user_equipment::Error::Changed) => CommandError::new(
                 "equipment_snapshot_changed",
                 "Equipment data changed. Refresh before trying again.",
@@ -550,7 +540,7 @@ fn refresh_plugin(state: &AppState) -> Result<(), CommandError> {
     if !settled {
         state
             .equipment_service()
-            .set("idle", "No equipment operation is pending")?;
+            .set("idle", EQUIPMENT_IDLE_MESSAGE_KEY)?;
     }
     Ok(())
 }
@@ -585,7 +575,7 @@ pub(crate) fn poll_plugin_changes(
         if service.poll_snapshot()?.operation.message_key
             == "Equipment connection is unavailable. Check the User and Combat plugins, then refresh."
         {
-            service.set("idle", "No equipment operation is pending")?;
+            service.set("idle", EQUIPMENT_IDLE_MESSAGE_KEY)?;
         }
         return Ok(());
     }
@@ -615,14 +605,14 @@ pub(crate) fn poll_plugin_changes(
     service.inventory.publish(host.identity(), data)?;
     service.inventory.set_watch(next)?;
     if !settled && service.poll_snapshot()?.operation.status == "error" {
-        service.set("idle", "No equipment operation is pending")?;
+        service.set("idle", EQUIPMENT_IDLE_MESSAGE_KEY)?;
     }
     Ok(())
 }
 fn submit(
     state: &AppState,
     character: HtItemNetId,
-    operation: ModsPluginOperation,
+    operation: EquipmentOperation,
 ) -> Result<(), CommandError> {
     use nte_dps_tool::core::equipment_runtime;
     if !state.uses_plugin_equipment()? {
@@ -641,10 +631,10 @@ fn submit(
     if service.inventory.confirming()? {
         return Err(CommandError::new(
             "equipment_confirmation_pending",
-            CONFIRMING,
+            EQUIPMENT_CONFIRMING_MESSAGE_KEY,
         ));
     }
-    service.set("pending", "Sending equipment request...")?;
+    service.set("pending", EQUIPMENT_SENDING_MESSAGE_KEY)?;
     let result = (|| {
         let mut client =
             equipment_runtime::connect(&state.equipment_rpc(), &host, host.process_identity().0)?;
@@ -673,11 +663,8 @@ fn submit(
         }
     })();
     match &result {
-        Ok(false) => service.set("pending", CONFIRMING),
-        Ok(true) => service.set(
-            "success",
-            "Equipment change confirmed by refreshed inventory.",
-        ),
+        Ok(false) => service.set("pending", EQUIPMENT_CONFIRMING_MESSAGE_KEY),
+        Ok(true) => service.set("success", EQUIPMENT_CONFIRMED_MESSAGE_KEY),
         Err(e) => service.set("error", e.message_key),
     }?;
     result.map(|_| ())
@@ -921,7 +908,7 @@ mod tests {
         let result = submit(
             &state,
             HtItemNetId::ZERO,
-            ModsPluginOperation::SetItemLocked {
+            EquipmentOperation::SetItemLocked {
                 equipment: HtItemNetId::ZERO,
                 locked: true,
             },
@@ -941,7 +928,7 @@ mod tests {
             ToolkitError::Busy,
         )));
         assert_eq!(pending.code, "equipment_confirmation_pending");
-        assert_eq!(pending.message_key, super::CONFIRMING);
+        assert_eq!(pending.message_key, super::EQUIPMENT_CONFIRMING_MESSAGE_KEY);
     }
     use super::*;
 

@@ -1,8 +1,101 @@
 use std::collections::HashMap;
 
 use crate::engine::model::{
-    CharacterInfo, Hit, IndexedCombatDetailFilter, is_unbalance_damage_hit, reaction_damage_for_hit,
+    CharacterInfo, CharacterStats, Hit, IndexedCombatDetailFilter, is_unbalance_damage_hit,
+    reaction_damage_for_hit,
 };
+
+pub const MALICE_ATTACK_TYPE: &str = "恶意";
+pub const ESPER_CYCLE_PREFIX: &str = "环合·";
+pub const TARGET_HP_RESIDUAL_NAME: &str = "Target HP Residual";
+pub const UNMAPPED_SKILL_ID: &str = "Unmapped Skill";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CombatDetailMetrics {
+    pub total_output: f64,
+    pub dps: f64,
+    pub output_count: u64,
+    pub incoming_count: u64,
+    pub total_damage_taken: f64,
+    pub duration_seconds: f64,
+}
+
+pub fn character_detail_metrics(
+    stats: &HashMap<u32, CharacterStats>,
+    character_id: u32,
+    separate_reaction_damage: bool,
+    duration_seconds: f64,
+) -> CombatDetailMetrics {
+    let row = stats
+        .get(&character_id)
+        .cloned()
+        .unwrap_or_default()
+        .for_reaction_damage_policy(separate_reaction_damage);
+    CombatDetailMetrics {
+        total_output: row.damage,
+        dps: row.damage / duration_seconds.max(1.0),
+        output_count: row.hits,
+        incoming_count: row.hits_taken,
+        total_damage_taken: row.damage_taken,
+        duration_seconds,
+    }
+}
+
+pub fn team_detail_metrics(
+    stats: &HashMap<u32, CharacterStats>,
+    total_damage: f64,
+    total_damage_taken: f64,
+    duration_seconds: f64,
+) -> CombatDetailMetrics {
+    CombatDetailMetrics {
+        total_output: total_damage,
+        dps: total_damage / duration_seconds.max(1.0),
+        output_count: stats.values().map(|row| row.hits).sum(),
+        incoming_count: stats.values().map(|row| row.hits_taken).sum(),
+        total_damage_taken,
+        duration_seconds,
+    }
+}
+
+pub fn share_percent(value: f64, total: f64) -> f64 {
+    if total > 0.0 {
+        value / total * 100.0
+    } else {
+        0.0
+    }
+}
+
+pub fn esper_cycle_reaction(attack_type: &str) -> Option<&str> {
+    attack_type.strip_prefix(ESPER_CYCLE_PREFIX)
+}
+
+pub fn is_malice_hit(hit: &Hit) -> bool {
+    hit.attack_type.as_deref() == Some(MALICE_ATTACK_TYPE)
+}
+
+pub fn is_target_hp_residual(hit: &Hit) -> bool {
+    hit.damage_name.as_deref() == Some(TARGET_HP_RESIDUAL_NAME)
+}
+
+pub fn is_technical_skill_name(value: &str) -> bool {
+    value.starts_with("GA_")
+        || value.starts_with("GE_")
+        || value.starts_with("Buff_")
+        || value.contains('_')
+}
+
+pub fn hit_skill_name_ref(hit: &Hit) -> &str {
+    if is_malice_hit(hit) {
+        return MALICE_ATTACK_TYPE;
+    }
+    hit.damage_component
+        .as_deref()
+        .or(hit.ability_name.as_deref())
+        .or(hit.gameplay_effect_name.as_deref())
+        .or(hit.damage_name.as_deref())
+        .or(hit.attack_type.as_deref())
+        .unwrap_or(UNMAPPED_SKILL_ID)
+}
 
 /// Stable, frontend-neutral filtering for combat hit detail projections.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -74,7 +167,7 @@ pub fn reaction_text_key_for_hit(hit: &Hit) -> Option<u8> {
 }
 
 pub fn reaction_text_key_from_trigger_attack_type(attack_type: &str) -> Option<u8> {
-    let reaction = attack_type.strip_prefix("环合·")?;
+    let reaction = esper_cycle_reaction(attack_type)?;
     match reaction {
         "创生" | "创生花" => Some(1),
         "覆纹" => Some(2),
@@ -123,12 +216,12 @@ pub fn mixed_damage_digit_key(
     attack_type: &str,
     source_attribute: Option<&str>,
 ) -> Option<&'static str> {
-    if attack_type.starts_with("环合·") {
+    if esper_cycle_reaction(attack_type).is_some() {
         return None;
     }
     match attack_type {
         "创生" | "创生花" => Some("Guangling_G"),
-        "恶意" => Some("heiyu"),
+        MALICE_ATTACK_TYPE => Some("heiyu"),
         "覆纹" => Some("lingzhou_L"),
         "黯星" => Some("Anhun_A"),
         "浊燃" => Some("Zhouan_A"),

@@ -8,11 +8,24 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::storage::mod_scripts::validate_mod_id;
 use std::{
     io::{Read, Write},
     path::Path,
 };
+
+fn validate_mod_id(id: &str) -> Result<(), ()> {
+    if id.is_empty()
+        || id.len() > 31
+        || id.bytes().any(|value| {
+            !value.is_ascii_lowercase()
+                && !value.is_ascii_digit()
+                && !matches!(value, b'-' | b'_' | b'.')
+        })
+    {
+        return Err(());
+    }
+    Ok(())
+}
 pub const MAX_PLUGIN_BYTES: usize = 64 * 1024 * 1024;
 
 pub const MOD_MARKET_SCHEMA_VERSION: u32 = 6;
